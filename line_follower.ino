@@ -22,6 +22,13 @@
 #define BASE_SPEED 80 // Base motor speed
 #define MAX_SPEED 120 // Maximum motor speed
 
+// Turn handling
+#define LEFT_TURN 0
+#define RIGHT_TURN 1
+#define NO_TURN 2
+#define TURN_THRESHOLD 2.0  // How far from center indicates a turn
+#define RECOVERY_SPEED 100  // Speed for recovery turns
+
 // Sensor settings
 #define NUM_SENSORS 8
 #define SENSOR_THRESHOLD 760
@@ -30,12 +37,17 @@
 // Variables for PID control
 float lastError = 0;
 float position = IDEAL_POSITION;
+int lastTurn = NO_TURN;           // Remembers the last turn direction
+unsigned long lineLastSeen = 0;   // Time when line was last seen
+bool inRecoveryMode = false;      // Flag for recovery mode
+int recoveryAttempts = 0;         // Count of recovery attempts
 
 // Function prototypes
 void readSensors(int *sensorValues, float *position);
 void calculatePID(float currentPosition, float *pidValue);
 void setMotorSpeeds(int leftSpeed, int rightSpeed);
-void calibrateSensors();
+void recoverLine(int *sensorValues);
+bool detectLShapeTurn(int *sensorValues, float position);
 
 void setup() {
   // Initialize motor pins as outputs
@@ -66,34 +78,144 @@ void loop() {
   
   // Check if line is detected
   if (position >= 0) {
-    // Calculate PID value
-    calculatePID(position, &pidValue);
+    // Reset recovery mode if we found the line
+    if (inRecoveryMode) {
+      inRecoveryMode = false;
+      recoveryAttempts = 0;
+      Serial.println("Line found during recovery!");
+    }
     
-    // Calculate motor speeds
-    int leftSpeed = BASE_SPEED + pidValue;
-    int rightSpeed = BASE_SPEED - pidValue;
+    // Update time when line was last seen
+    lineLastSeen = millis();
     
-    // Set motor speeds
-    setMotorSpeeds(leftSpeed, rightSpeed);
-    
-    // Debug output
-    Serial.print("Position: ");
-    Serial.print(position);
-    Serial.print(" PID: ");
-    Serial.print(pidValue);
-    Serial.print(" Motors L/R: ");
-    Serial.print(leftSpeed);
-    Serial.print("/");
-    Serial.println(rightSpeed);
+    // Check for L-shape turn
+    if (detectLShapeTurn(sensorValues, position)) {
+      // Handle turn specifically
+      if (position < IDEAL_POSITION) {
+        // L-turn to the left
+        lastTurn = LEFT_TURN;
+        Serial.println("L-Turn LEFT detected");
+        setMotorSpeeds(0, RECOVERY_SPEED); // Sharp left turn
+        delay(50); // Give time to make the turn
+      } else {
+        // L-turn to the right
+        lastTurn = RIGHT_TURN;
+        Serial.println("L-Turn RIGHT detected");
+        setMotorSpeeds(RECOVERY_SPEED, 0); // Sharp right turn
+        delay(50); // Give time to make the turn
+      }
+    } else {
+      // Normal line following
+      // Update last turn direction based on position (for recovery if needed later)
+      if (position < IDEAL_POSITION - 1.0) {
+        lastTurn = LEFT_TURN; // Line is on the left
+      } else if (position > IDEAL_POSITION + 1.0) {
+        lastTurn = RIGHT_TURN; // Line is on the right
+      }
+      
+      // Calculate PID value
+      calculatePID(position, &pidValue);
+      
+      // Calculate motor speeds
+      int leftSpeed = BASE_SPEED + pidValue;
+      int rightSpeed = BASE_SPEED - pidValue;
+      
+      // Set motor speeds
+      setMotorSpeeds(leftSpeed, rightSpeed);
+      
+      // Debug output
+      Serial.print("Position: ");
+      Serial.print(position);
+      Serial.print(" PID: ");
+      Serial.print(pidValue);
+      Serial.print(" Motors L/R: ");
+      Serial.print(leftSpeed);
+      Serial.print("/");
+      Serial.println(rightSpeed);
+    }
   } else {
-    // Line lost - implement recovery behavior
-    // For now, just stop
-    setMotorSpeeds(0, 0);
-    Serial.println("Line lost!");
+    // Line lost - enter recovery mode
+    // Only enter recovery if the line was recently seen (avoid continuous recovery)
+    if (!inRecoveryMode && millis() - lineLastSeen < 2000) {
+      inRecoveryMode = true;
+      Serial.println("Entering line recovery mode...");
+    }
+    
+    if (inRecoveryMode) {
+      recoverLine(sensorValues);
+    } else {
+      // Lost for too long, just stop
+      setMotorSpeeds(0, 0);
+      Serial.println("Line completely lost, stopping.");
+    }
   }
   
   // Short delay for stability
   delay(10);
+}
+
+/**
+ * Detects if the robot is encountering an L-shaped turn
+ */
+bool detectLShapeTurn(int *sensorValues, float position) {
+  // Check for L-shape turn pattern
+  // For L-turn to the left: only leftmost sensors see the line
+  // For L-turn to the right: only rightmost sensors see the line
+  
+  // Count active sensors on left and right sides
+  int leftActive = sensorValues[0] + sensorValues[1] + sensorValues[2];
+  int rightActive = sensorValues[5] + sensorValues[6] + sensorValues[7];
+  int centerActive = sensorValues[3] + sensorValues[4];
+  
+  // L-turn to the left: left sensors active, center/right inactive
+  if (leftActive >= 2 && centerActive == 0 && rightActive == 0) {
+    return true;
+  }
+  
+  // L-turn to the right: right sensors active, center/left inactive
+  if (rightActive >= 2 && centerActive == 0 && leftActive == 0) {
+    return true;
+  }
+  
+  // Check for extreme position (very far from center)
+  if (position < 1.0 || position > 6.0) {
+    return true;
+  }
+  
+  return false;
+}
+
+/**
+ * Attempts to recover the line when it's lost
+ */
+void recoverLine(int *sensorValues) {
+  // Check if we reached maximum recovery attempts
+  if (recoveryAttempts > 20) {
+    setMotorSpeeds(0, 0);
+    Serial.println("Max recovery attempts reached. Stopping.");
+    inRecoveryMode = false;
+    return;
+  }
+  
+  recoveryAttempts++;
+  
+  // Use last turn direction to guide recovery
+  if (lastTurn == LEFT_TURN) {
+    // Turn left to find the line
+    Serial.println("Recovering - turning LEFT");
+    setMotorSpeeds(-RECOVERY_SPEED/2, RECOVERY_SPEED);
+  } else if (lastTurn == RIGHT_TURN) {
+    // Turn right to find the line
+    Serial.println("Recovering - turning RIGHT");
+    setMotorSpeeds(RECOVERY_SPEED, -RECOVERY_SPEED/2);
+  } else {
+    // No known direction, small clockwise rotation or backward
+    Serial.println("Recovering - no direction");
+    setMotorSpeeds(-RECOVERY_SPEED/2, RECOVERY_SPEED/2);
+  }
+  
+  // Short delay to allow movement
+  delay(50);
 }
 
 /**
