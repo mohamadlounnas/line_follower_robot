@@ -15,19 +15,23 @@
   int thresholds = 760; //threshold = (minimum analog value + Maximum Analog Value) / 2
   
   float c; // Position value (weighted average of sensor readings)
-  int left_motor_speed = 80, right_motor_speed = 80;
+  int left_motor_speed = 90, right_motor_speed = 90; // Increased base speed for faster response
   int left_motor, right_motor;
-  int kp = 30, kd = 35; // PID constants for line following
+  int kp = 35, kd = 45; // Increased PID constants for more aggressive corrections
   int PID_value;
   float current_error, previous_error;
-  int turn_speed = 120;
+  int turn_speed = 140; // Increased turn speed for faster response
   char last_direction = 'n'; // 'n' for none, 'l' for left, 'r' for right
-  int maxs = 120; // Maximum motor speed
+  int maxs = 150; // Increased maximum motor speed
   
   // Variables to track last line position
   float last_position = 4.5; // Default center position
   unsigned long last_line_detected = 0; // Time when line was last detected
-  unsigned long line_lost_timeout = 100; // Time in ms before considering line lost
+  unsigned long line_lost_timeout = 50; // Reduced timeout for faster response
+  
+  // Flags to track turning state
+  bool is_turning = false;
+  bool turn_complete = false;
 
  
   void setup() {
@@ -85,6 +89,30 @@
   }
 
   /**
+   * Checks if the left side sensors are detecting the line
+   * @return true if left sensors detect line
+   */
+  bool left_line_detected() {
+    return (sensor[0] == 1 || sensor[1] == 1 || sensor[2] == 1);
+  }
+
+  /**
+   * Checks if the right side sensors are detecting the line
+   * @return true if right sensors detect line
+   */
+  bool right_line_detected() {
+    return (sensor[5] == 1 || sensor[6] == 1 || sensor[7] == 1);
+  }
+
+  /**
+   * Checks if center sensors are detecting the line
+   * @return true if center sensors detect line
+   */
+  bool center_line_detected() {
+    return (sensor[3] == 1 || sensor[4] == 1);
+  }
+
+  /**
    * Main line following function with PID control and decision making
    * Handles different cases based on sensor readings
    */
@@ -101,8 +129,8 @@
         }
       }
       
-      // Line is detected - use PID control for line following
-      if (line_detected) {
+      // ---- CASE 1: Line is detected - use PID control for line following ----
+      if (line_detected && !is_turning) {
         current_error = 4.5 - c;
         Serial.print(current_error);
         Serial.print("  ");
@@ -114,31 +142,47 @@
         left_motor = left_motor_speed + PID_value;
         motor(left_motor, right_motor);
         
-        // Update last direction based on the current position
-        if (c < 4) {
+        // Update last direction more aggressively based on position
+        if (c < 3.5) {
           last_direction = 'l'; // Line is on the left
-        } else if (c > 5) {
+        } else if (c > 5.5) {
           last_direction = 'r'; // Line is on the right
+        }
+        
+        // Check for sharp left/right turns
+        if (sensor[0] == 1 && !right_line_detected()) {
+          // Sharp left turn detected
+          last_direction = 'l';
+          is_turning = true;
+          left();
+        }
+        else if (sensor[7] == 1 && !left_line_detected()) {
+          // Sharp right turn detected
+          last_direction = 'r';
+          is_turning = true;
+          right();
         }
       }
       
-      // All sensors on white surface (lost the line)
-      else if (sensor[0] == 0 && sensor[1] == 0 && sensor[2] == 0 && sensor[3] == 0 && 
-               sensor[4] == 0 && sensor[5] == 0 && sensor[6] == 0 && sensor[7] == 0) {
+      // ---- CASE 2: All sensors on white (lost the line) ----
+      else if (!line_detected && !is_turning) {
         
-        // Check if we just recently lost the line
+        // Check if we just recently lost the line (short-term recovery)
         if (millis() - last_line_detected < line_lost_timeout) {
-          // Continue in the same direction as before (short-term memory)
-          if (last_position < 4) {
-            motor(turn_speed/2, turn_speed);  // Slight left turn
-          } else if (last_position > 5) {
-            motor(turn_speed, turn_speed/2);  // Slight right turn
+          // Continue in the same direction as before
+          if (last_position < 3.5) {
+            motor(turn_speed/3, turn_speed);  // More aggressive left turn
+          } else if (last_position > 5.5) {
+            motor(turn_speed, turn_speed/3);  // More aggressive right turn
           } else {
             motor(turn_speed, turn_speed);  // Go straight
           }
         }
-        // Line has been lost for a while, use last_direction for recovery
+        // Line has been lost for a while, start turning recovery
         else {
+          is_turning = true;
+          turn_complete = false;
+          
           if (last_direction == 'r') {
             right();
           } 
@@ -150,22 +194,28 @@
           }
         }
       }
-
-      // Rightmost sensor is detecting and leftmost is not - prepare for right turn
-      if (sensor[7] == 1 && sensor[0] == 0) {
-        last_direction = 'r';
+      
+      // ---- CASE 3: Handle special corner/junction cases ----
+      
+      // Left corner - multiple left sensors detecting
+      if (sensor[0] == 1 && sensor[1] == 1 && sensor[2] == 1 && !right_line_detected()) {
+        last_direction = 'l';
+        is_turning = true;
+        left();
       }
       
-      // Leftmost sensor is detecting and rightmost is not - prepare for left turn
-      if (sensor[0] == 1 && sensor[7] == 0) {
-        last_direction = 'l';
+      // Right corner - multiple right sensors detecting
+      if (sensor[5] == 1 && sensor[6] == 1 && sensor[7] == 1 && !left_line_detected()) {
+        last_direction = 'r';
+        is_turning = true;
+        right();
       }
 
       // All sensors detecting black - could be a junction or end of track
       if (sensor[0] == 1 && sensor[1] == 1 && sensor[2] == 1 && sensor[3] == 1 && 
           sensor[4] == 1 && sensor[5] == 1 && sensor[6] == 1 && sensor[7] == 1) {
         
-        delay(30); // Short delay to confirm reading
+        delay(20); // Short delay to confirm reading
         sensor_reading();
         
         // Still all black - stop and wait
@@ -177,6 +227,7 @@
         } 
         // If middle sensors show white but outer sensors show black, turn based on last direction
         else if (sensor[0] == 0 && sensor[7] == 0) {
+          is_turning = true;
           if (last_direction == 'l') {
             left();
           } else {
@@ -184,58 +235,113 @@
           }
         }
       }
+      
+      // Reset turning flag if we're now on the line and centered
+      if (is_turning && center_line_detected()) {
+        is_turning = false;
+      }
     }
   }
 
   /**
    * Turn right until the center sensors detect the line
+   * Now keeps turning until properly centered
    */
   void right() {
-    while (1) {
-      motor(turn_speed, 0); // Turn right
-      sensor_reading();
-      // Wait until center sensors detect the line
-      while (sensor[3] == 0 && sensor[4] == 0) {
+    // Begin right turn
+    motor(turn_speed, -turn_speed/2); // More aggressive turning
+    
+    // First wait until ALL sensors are off the line (if not already)
+    boolean all_clear = false;
+    sensor_reading();
+    
+    // If some sensors already see the line, wait until we lose the line completely
+    if (sensor[0] == 1 || sensor[1] == 1 || sensor[2] == 1 || sensor[3] == 1 || 
+        sensor[4] == 1 || sensor[5] == 1 || sensor[6] == 1 || sensor[7] == 1) {
+      
+      while (!all_clear) {
+        motor(turn_speed, -turn_speed/2);
         sensor_reading();
+        
+        // Check if all sensors are now clear
+        all_clear = true;
+        for (int i = 0; i < 8; i++) {
+          if (sensor[i] == 1) {
+            all_clear = false;
+            break;
+          }
+        }
       }
-      motor(0, turn_speed); // Apply small correction
-      delay(35);
-      break;
     }
+    
+    // Keep turning until the center sensors detect the line
+    while (!center_line_detected()) {
+      motor(turn_speed, -turn_speed/3);
+      sensor_reading();
+    }
+    
+    // Apply slight correction after finding center
+    motor(turn_speed/2, turn_speed);
+    delay(25);  // Shorter delay for faster response
   }
 
   /**
    * Turn left until the center sensors detect the line
+   * Now keeps turning until properly centered
    */
   void left() {
-    while (1) {
-      motor(0, turn_speed); // Turn left
-      sensor_reading();
-      // Wait until center sensors detect the line
-      while (sensor[3] == 0 && sensor[4] == 0) {
+    // Begin left turn
+    motor(-turn_speed/2, turn_speed); // More aggressive turning
+    
+    // First wait until ALL sensors are off the line (if not already)
+    boolean all_clear = false;
+    sensor_reading();
+    
+    // If some sensors already see the line, wait until we lose the line completely
+    if (sensor[0] == 1 || sensor[1] == 1 || sensor[2] == 1 || sensor[3] == 1 || 
+        sensor[4] == 1 || sensor[5] == 1 || sensor[6] == 1 || sensor[7] == 1) {
+      
+      while (!all_clear) {
+        motor(-turn_speed/2, turn_speed);
         sensor_reading();
+        
+        // Check if all sensors are now clear
+        all_clear = true;
+        for (int i = 0; i < 8; i++) {
+          if (sensor[i] == 1) {
+            all_clear = false;
+            break;
+          }
+        }
       }
-      motor(turn_speed, 0); // Apply small correction
-      delay(35);
-      break;
     }
+    
+    // Keep turning until the center sensors detect the line
+    while (!center_line_detected()) {
+      motor(-turn_speed/3, turn_speed);
+      sensor_reading();
+    }
+    
+    // Apply slight correction after finding center
+    motor(turn_speed, turn_speed/2);
+    delay(25);  // Shorter delay for faster response
   }
   
   /**
    * Perform a 180-degree turn to find the line again
    */
   void U_turn() {
-    while (1) {
-      delay(120);
-      motor(-turn_speed, turn_speed); // Rotate in place
-      // Wait until center sensors detect the line
-      while (sensor[3] == 0 && sensor[4] == 0) {
-        sensor_reading();
-      }
-      motor(turn_speed, -turn_speed); // Apply small correction
-      delay(20);
-      break;
+    // More aggressive U-turn
+    motor(-turn_speed, turn_speed);
+    
+    // Keep turning until any sensor detects the line
+    while (!center_line_detected()) {
+      sensor_reading();
     }
+    
+    // Apply slight correction
+    motor(turn_speed, -turn_speed/3);
+    delay(15);  // Shorter delay for faster response
   }
  
   /**
@@ -244,7 +350,7 @@
    * @param b Right motor speed (positive = forward, negative = backward)
    */
   void motor(int a, int b) {
-    // Left motor control
+    // Left motor control with limits
     if (a >= 0) {
       analogWrite(lmf, a > maxs ? maxs : a);
       analogWrite(lmb, 0);
@@ -253,7 +359,7 @@
       analogWrite(lmb, abs(a) > maxs ? maxs : abs(a));
     }
     
-    // Right motor control
+    // Right motor control with limits
     if (b >= 0) {
       analogWrite(rmf, b > maxs ? maxs : b);
       analogWrite(rmb, 0);
