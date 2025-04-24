@@ -1,405 +1,329 @@
 /**
- * Simple and Robust Line Follower
- * Uses edge following approach - follows right edge of the line
+ * Advanced Line Follower Robot
+ * 
+ * This implementation includes:
+ * - Sensor calibration for reliable readings
+ * - PID control for smooth line following
+ * - Memory of last detected line position for recovery
+ * - Robust line loss handling
+ * 
+ * Hardware Configuration:
+ * - 8 IR sensors on analog pins A0-A7
+ * - Motor pins: lmf(9), lmb(6), rmf(10), rmb(11)
  */
 
 // Motor pins
-#define RIGHT_MOTOR_FORWARD 10  // IN1
-#define RIGHT_MOTOR_BACKWARD 11 // IN2
-#define LEFT_MOTOR_FORWARD 9    // IN3
-#define LEFT_MOTOR_BACKWARD 6   // IN4
+#define rmf 10 // Right motor forward 
+#define rmb 11 // Right motor backward
+#define lmf 9  // Left motor forward
+#define lmb 6  // Left motor backward
 
-// Constants for line following
-#define SENSOR_COUNT 8
-#define THRESHOLD 760           // Threshold to detect black line
-#define TARGET_SENSOR 6         // Target sensor to keep on the line (right edge following)
+// PID control constants
+#define Kp 0.2       // Proportional constant
+#define Kd 2.0       // Derivative constant
+#define BaseSpeed 80 // Base motor speed
+#define MaxSpeed 120 // Maximum motor speed
+#define TurnSpeed 100 // Speed for turning
 
-// Speed settings
-#define BASE_SPEED 95           // Normal speed
-#define TURN_SPEED 75           // Speed during turns
-#define SEARCH_TIMEOUT 2000     // Max time to search for line (ms)
+// Sensor array configuration
+#define NUM_SENSORS 8
+#define LINE_POSITION_CENTER 3500 // Center position (3.5 * 1000)
 
-// Time constants
-#define STRAIGHT_RESET_TIME 200 // Time (ms) to reset direction memory after going straight
+// Thresholds for line detection
+#define WHITE_THRESHOLD 100  // Low reading for white surface
+#define BLACK_THRESHOLD 900  // High reading for black line
+#define MIN_SENSORS_ON_LINE 1 // Minimum sensors required to consider on-line
 
-// Variables
-int sensor[SENSOR_COUNT];       // Array to store sensor values
-char lineDirection = 'N';       // 'L' for left, 'R' for right, 'N' for none
-char lastLineDirection = 'N';   // Last known direction of the line
-unsigned long lastLineTime = 0; // Last time the line was detected
-boolean isTurning = false;      // Flag to indicate we're in a turn
+// Calibration samples
+#define CALIBRATION_SAMPLES 100
 
-// Variables for direction reset timer
-unsigned long straightStartTime = 0;  // When robot started going straight
-boolean isGoingStraight = false;      // Flag to track straight motion
+// Global variables
+int sensorValues[NUM_SENSORS];     // Raw sensor readings
+int sensorMin[NUM_SENSORS];        // Calibration - minimum values
+int sensorMax[NUM_SENSORS];        // Calibration - maximum values
+int lastPosition = LINE_POSITION_CENTER; // Last known line position
+int lastError = 0;                 // Previous error for derivative term
+char lastDirection = 'c';          // Last turning direction (l=left, r=right, c=center)
+bool isCalibrated = false;         // Calibration flag
 
 /**
  * Setup function - runs once at startup
  */
 void setup() {
-  // Set motor control pins as outputs
-  pinMode(RIGHT_MOTOR_FORWARD, OUTPUT);
-  pinMode(RIGHT_MOTOR_BACKWARD, OUTPUT);
-  pinMode(LEFT_MOTOR_FORWARD, OUTPUT);
-  pinMode(LEFT_MOTOR_BACKWARD, OUTPUT);
+  // Initialize motor control pins
+  pinMode(lmf, OUTPUT);
+  pinMode(lmb, OUTPUT);
+  pinMode(rmf, OUTPUT);
+  pinMode(rmb, OUTPUT);
   
+  // Initialize serial for debugging
   Serial.begin(9600);
+  
+  // Run calibration routine
+  calibrateSensors();
 }
 
 /**
- * Main loop - runs continuously
+ * Main program loop
  */
 void loop() {
-  // Read sensors
-  readSensors();
-  
-  // Track straight movement for direction reset
-  updateStraightTimer();
-  
-  // Determine what to do based on sensor readings
-  if (isLineDetected()) {
-    // Line is detected - continue with edge following
-    followLineEdge();
-  } else {
-    // No line detected - handle line loss
-    handleLineLoss();
-  }
-  
-  // Debug output
-  printDebugInfo();
+  followLine();
 }
 
 /**
- * Track how long robot has been going straight to reset direction memory
- * Resets lastLineDirection after STRAIGHT_RESET_TIME (0.2s)
+ * Calibrate sensors to adjust for ambient light conditions
+ * Rotates robot during calibration to capture full sensor range
  */
-void updateStraightTimer() {
-  // Check if robot is currently moving straight (target sensor on line)
-  if (sensor[TARGET_SENSOR] == 1 && !isTurning) {
-    // Start tracking straight movement if we weren't already
-    if (!isGoingStraight) {
-      straightStartTime = millis();
-      isGoingStraight = true;
-    } 
-    // If going straight for more than STRAIGHT_RESET_TIME, reset direction memory
-    else if (millis() - straightStartTime > STRAIGHT_RESET_TIME) {
-      lastLineDirection = 'N';  // Reset direction memory
-    }
-  } else {
-    // Not going straight, reset the flag
-    isGoingStraight = false;
-  }
-}
-
-/**
- * Reads all IR sensors
- */
-void readSensors() {
-  // Read all 8 IR sensors
-  sensor[0] = analogRead(A0);
-  sensor[1] = analogRead(A1);
-  sensor[2] = analogRead(A2);
-  sensor[3] = analogRead(A3);
-  sensor[4] = analogRead(A4);
-  sensor[5] = analogRead(A5);
-  sensor[6] = analogRead(A6);
-  sensor[7] = analogRead(A7);
+void calibrateSensors() {
+  Serial.println("Starting calibration...");
   
-  // Convert to binary (0/1)
-  for (int i = 0; i < SENSOR_COUNT; i++) {
-    sensor[i] = (sensor[i] > THRESHOLD) ? 1 : 0;
+  // Initialize calibration values
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    sensorMin[i] = 1023;
+    sensorMax[i] = 0;
   }
   
-  // Update last time line was detected if any sensor sees the line
-  if (isLineDetected()) {
-    lastLineTime = millis();
-    
-    // Update line direction based on which sensors detect the line
-    updateLineDirection();
-  }
-}
-
-/**
- * Updates the direction of the line based on sensor readings
- */
-void updateLineDirection() {
-  // If target sensor is on, we're good (on the right edge)
-  if (sensor[TARGET_SENSOR] == 1) {
-    lineDirection = 'C'; // centered on edge
-  }
-  // If sensors to the left of target are on, line is to the left
-  else if (sensor[TARGET_SENSOR-1] == 1 || sensor[TARGET_SENSOR-2] == 1) {
-    lineDirection = 'L';
-    lastLineDirection = 'L';
-  }
-  // If sensor to the right of target is on, line is to the right
-  else if (sensor[7] == 1) {
-    lineDirection = 'R';
-    lastLineDirection = 'R';
-  }
-  // If other sensors detect the line, determine direction
-  else if (isLineDetected()) {
-    // Count sensors on left vs right side
-    int leftCount = 0;
-    int rightCount = 0;
-    
-    for (int i = 0; i < TARGET_SENSOR-2; i++) {
-      if (sensor[i] == 1) leftCount++;
+  // Rotate left and right to calibrate sensors
+  for (int i = 0; i < CALIBRATION_SAMPLES; i++) {
+    // Zigzag motion during calibration
+    if (i < CALIBRATION_SAMPLES/2) {
+      motor(TurnSpeed, -TurnSpeed); // Turn left
+    } else {
+      motor(-TurnSpeed, TurnSpeed); // Turn right
     }
     
-    for (int i = TARGET_SENSOR+1; i < SENSOR_COUNT; i++) {
-      if (sensor[i] == 1) rightCount++;
-    }
-    
-    if (leftCount > rightCount) {
-      lineDirection = 'L';
-      lastLineDirection = 'L';
-    } else if (rightCount > 0) {
-      lineDirection = 'R';
-      lastLineDirection = 'R';
-    }
-  }
-}
-
-/**
- * Checks if any sensor detects the line
- */
-bool isLineDetected() {
-  for (int i = 0; i < SENSOR_COUNT; i++) {
-    if (sensor[i] == 1) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Checks if all sensors detect black (junction or end of track)
- */
-bool isAllBlack() {
-  int sum = 0;
-  for (int i = 0; i < SENSOR_COUNT; i++) {
-    sum += sensor[i];
-  }
-  return sum == SENSOR_COUNT;
-}
-
-/**
- * Edge following function that keeps sensor TARGET_SENSOR on the line
- */
-void followLineEdge() {
-  // Check for special cases first
-  
-  // All black - might be a junction
-  if (isAllBlack()) {
-    delay(10); // Brief delay to confirm reading
-    readSensors();
-    
-    if (isAllBlack()) {
-      // All black - stop
-      stopMotors();
-      
-      // Wait until we're no longer on all black
-      while (isAllBlack()) {
-        readSensors();
-        delay(10);
+    // Read sensors and update min/max values
+    readSensors(false);
+    for (int j = 0; j < NUM_SENSORS; j++) {
+      if (sensorValues[j] < sensorMin[j]) {
+        sensorMin[j] = sensorValues[j];
       }
-      return;
-    }
-  }
-  
-  // Edge following logic
-  if (sensor[TARGET_SENSOR] == 1) {
-    // Target sensor on line - go straight
-    setMotors(BASE_SPEED, BASE_SPEED);
-    isTurning = false;
-  }
-  else if (sensor[TARGET_SENSOR-1] == 1 || sensor[TARGET_SENSOR-2] == 1) {
-    // Line is to the left of target - turn left
-    // Left wheel slower or stopped, right wheel at normal speed
-    setMotors(0, BASE_SPEED);
-    lastLineDirection = 'L';
-    isTurning = true;
-  }
-  else if (sensor[7] == 1) {
-    // Line is to the right of target - turn right
-    // Right wheel slower or stopped, left wheel at normal speed
-    setMotors(BASE_SPEED, 0);
-    lastLineDirection = 'R';
-    isTurning = true;
-  }
-  else {
-    // No sensor on right edge - check other sensors
-    int leftActive = 0;
-    int rightActive = 0;
-    
-    // Count sensors active on left and right side
-    for (int i = 0; i < 3; i++) {
-      if (sensor[i] == 1) leftActive++;
-    }
-    
-    for (int i = 3; i < TARGET_SENSOR; i++) {
-      if (sensor[i] == 1) rightActive++;
-    }
-    
-    if (leftActive > 0) {
-      // Line is far to the left - sharp left turn
-      setMotors(0, BASE_SPEED);
-      lastLineDirection = 'L';
-      isTurning = true;
-    } else if (rightActive > 0) {
-      // Line is between center and target - gentle right turn
-      setMotors(BASE_SPEED, TURN_SPEED);
-      lastLineDirection = 'R';
-      isTurning = true;
-    } else {
-      // No clear indication - use last direction
-      if (lastLineDirection == 'L') {
-        setMotors(0, BASE_SPEED);
-      } else if (lastLineDirection == 'R') {
-        setMotors(BASE_SPEED, 0);
-      } else {
-        // No direction memory - go straight
-        setMotors(BASE_SPEED, BASE_SPEED);
+      if (sensorValues[j] > sensorMax[j]) {
+        sensorMax[j] = sensorValues[j];
       }
-      isTurning = true;
     }
-  }
-}
-
-/**
- * Handle case where line is completely lost
- */
-void handleLineLoss() {
-  // If we just lost the line (within last 100ms), continue same direction
-  if (millis() - lastLineTime < 100) {
-    if (lastLineDirection == 'L') {
-      // Turn left (left wheel stopped, right wheel forward)
-      setMotors(0, BASE_SPEED);
-    } else if (lastLineDirection == 'R') {
-      // Turn right (right wheel stopped, left wheel forward)
-      setMotors(BASE_SPEED, 0);
-    } else {
-      // No direction memory - search pattern
-      searchPattern();
-    }
-  } else {
-    // Line has been lost for a while - search pattern
-    searchPattern();
+    
+    delay(10);
   }
   
-  isTurning = true;
-}
-
-/**
- * Search pattern to find the line when completely lost
- */
-void searchPattern() {
-  static unsigned long searchStartTime = 0;
-  static boolean searchStarted = false;
-  static char searchDirection = 'L';
+  // Stop motors
+  motor(0, 0);
   
-  // Initialize search if we haven't already
-  if (!searchStarted) {
-    searchStartTime = millis();
-    searchStarted = true;
-    searchDirection = 'L'; // Start with left search
+  // Debug output of calibration values
+  Serial.println("Calibration complete!");
+  Serial.println("Min values:");
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    Serial.print(sensorMin[i]);
+    Serial.print(" ");
   }
-  
-  // Time-based search pattern
-  unsigned long searchTime = millis() - searchStartTime;
-  
-  if (searchTime < 1000) {
-    // First try left for 1 second
-    setMotors(0, BASE_SPEED);
-  } 
-  else if (searchTime < 3000) {
-    // Then try right for 2 seconds
-    setMotors(BASE_SPEED, 0);
-  }
-  else {
-    // Then alternate with wider sweeps
-    if (searchDirection == 'L') {
-      setMotors(0, BASE_SPEED);
-      if (searchTime % 1500 == 0) searchDirection = 'R';
-    } else {
-      setMotors(BASE_SPEED, 0);
-      if (searchTime % 1500 == 0) searchDirection = 'L';
-    }
-  }
-  
-  // If search has gone on too long, stop and reset
-  if (searchTime > SEARCH_TIMEOUT) {
-    stopMotors();
-    searchStarted = false;
-  }
-  
-  // If we found the line, reset search state
-  if (isLineDetected()) {
-    searchStarted = false;
-  }
-}
-
-/**
- * Stop all motors
- */
-void stopMotors() {
-  setMotors(0, 0);
-}
-
-/**
- * Set motor speeds - forward only, no backward motion
- * @param leftSpeed Left motor speed (0-255)
- * @param rightSpeed Right motor speed (0-255)
- */
-void setMotors(int leftSpeed, int rightSpeed) {
-  // Ensure values are positive (forward only) and within range
-  leftSpeed = constrain(leftSpeed, 0, 255);
-  rightSpeed = constrain(rightSpeed, 0, 255);
-  
-  // Left motor - forward only
-  analogWrite(LEFT_MOTOR_FORWARD, leftSpeed);
-  analogWrite(LEFT_MOTOR_BACKWARD, 0);
-  
-  // Right motor - forward only
-  analogWrite(RIGHT_MOTOR_FORWARD, rightSpeed);
-  analogWrite(RIGHT_MOTOR_BACKWARD, 0);
-}
-
-/**
- * Constrain a value between a minimum and maximum
- */
-int constrain(int value, int min, int max) {
-  if (value < min) return min;
-  if (value > max) return max;
-  return value;
-}
-
-/**
- * Print debug information to serial monitor
- */
-void printDebugInfo() {
-  Serial.print("Direction: ");
-  Serial.print(lineDirection);
-  Serial.print(" | Last: ");
-  Serial.print(lastLineDirection);
-  Serial.print(" | Straight: ");
-  Serial.print(isGoingStraight ? "YES" : "NO");
-  Serial.print(" | Time: ");
-  if (isGoingStraight) {
-    Serial.print((millis() - straightStartTime) / 1000.0, 1);
-    Serial.print("s");
-  } else {
-    Serial.print("--");
-  }
-  Serial.print(" | Sensors: ");
-  
-  for (int i = 0; i < SENSOR_COUNT; i++) {
-    Serial.print(sensor[i]);
-    if (i == TARGET_SENSOR) Serial.print("*"); // Mark target sensor
-    else Serial.print(" ");
-  }
-  
   Serial.println();
+  
+  Serial.println("Max values:");
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    Serial.print(sensorMax[i]);
+    Serial.print(" ");
+  }
+  Serial.println();
+  
+  isCalibrated = true;
+  
+  // Wait for a moment after calibration
+  delay(1000);
+}
+
+/**
+ * Read all sensor values
+ * @param normalize If true, normalize readings based on calibration data
+ * @return true if at least one sensor detects the line
+ */
+bool readSensors(bool normalize) {
+  int sensorsOnLine = 0;
+  
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    // Read raw analog values, A0 is sensor[0], A7 is sensor[7]
+    sensorValues[i] = analogRead(NUM_SENSORS - 1 - i);
+    
+    // Normalize based on calibration if needed
+    if (normalize && isCalibrated) {
+      // Constrain readings to calibration range
+      sensorValues[i] = constrain(sensorValues[i], sensorMin[i], sensorMax[i]);
+      // Map to 0-1000 range
+      sensorValues[i] = map(sensorValues[i], sensorMin[i], sensorMax[i], 0, 1000);
+      
+      // Count sensors that detect the line
+      if (sensorValues[i] > 500) {
+        sensorsOnLine++;
+      }
+    }
+    
+    // Print sensor values for debugging
+    Serial.print(sensorValues[i]);
+    Serial.print("\t");
+  }
+  
+  return (sensorsOnLine >= MIN_SENSORS_ON_LINE);
+}
+
+/**
+ * Calculate the weighted position of the line
+ * @return Position value from 0 to 7000, or last position if line is lost
+ */
+int getLinePosition() {
+  long sum = 0;
+  int weightedSum = 0;
+  
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    int value = sensorValues[i];
+    
+    // Only consider readings that likely indicate line presence
+    if (value > 200) {
+      weightedSum += value * (i * 1000);
+      sum += value;
+    }
+  }
+  
+  // Check if line is detected
+  if (sum > 50) {
+    lastPosition = weightedSum / sum;
+    
+    // Update direction memory based on line position
+    if (lastPosition < LINE_POSITION_CENTER - 1000) {
+      lastDirection = 'l'; // Line is on the left
+    } else if (lastPosition > LINE_POSITION_CENTER + 1000) {
+      lastDirection = 'r'; // Line is on the right
+    }
+    
+    Serial.print("Line Position: ");
+    Serial.println(lastPosition);
+    return lastPosition;
+  } else {
+    // Line not found, return last known position
+    Serial.print("Line lost! Last position: ");
+    Serial.println(lastPosition);
+    return lastPosition;
+  }
+}
+
+/**
+ * Main line following function using PID control
+ */
+void followLine() {
+  // Read sensor values (normalized)
+  bool onLine = readSensors(true);
+  int position = getLinePosition();
+  
+  // Calculate error from center position
+  int error = position - LINE_POSITION_CENTER;
+  
+  // Calculate PID components
+  int proportional = error;
+  int derivative = error - lastError;
+  lastError = error;
+  
+  // Calculate PID output
+  int pidOutput = (Kp * proportional) + (Kd * derivative);
+  
+  // Display PID information for debugging
+  Serial.print("Error: ");
+  Serial.print(error);
+  Serial.print(" PID: ");
+  Serial.println(pidOutput);
+  
+  // Determine motor speeds based on PID output
+  int leftMotorSpeed, rightMotorSpeed;
+  
+  if (onLine) {
+    // Line detected - normal PID control
+    leftMotorSpeed = BaseSpeed + pidOutput;
+    rightMotorSpeed = BaseSpeed - pidOutput;
+    
+    // Constrain speeds to valid range
+    leftMotorSpeed = constrain(leftMotorSpeed, -MaxSpeed, MaxSpeed);
+    rightMotorSpeed = constrain(rightMotorSpeed, -MaxSpeed, MaxSpeed);
+    
+    motor(leftMotorSpeed, rightMotorSpeed);
+  } else {
+    // Line lost - recovery behavior
+    recoverLine();
+  }
+}
+
+/**
+ * Recovery behavior when line is lost
+ */
+void recoverLine() {
+  // Stop briefly to stabilize
+  motor(0, 0);
+  delay(10);
+  
+  // Turn in the direction of the last known line position
+  if (lastDirection == 'l') {
+    // Line was on the left
+    Serial.println("Recovering - turning left");
+    motor(-TurnSpeed, TurnSpeed);
+  } else if (lastDirection == 'r') {
+    // Line was on the right
+    Serial.println("Recovering - turning right");
+    motor(TurnSpeed, -TurnSpeed);
+  } else {
+    // Unknown direction, search in a spiral pattern
+    Serial.println("Recovering - searching pattern");
+    
+    // Alternate turning directions in a widening pattern
+    static int searchStage = 0;
+    static int searchTime = 100;
+    
+    if (searchStage % 2 == 0) {
+      motor(TurnSpeed, -TurnSpeed);
+    } else {
+      motor(-TurnSpeed, TurnSpeed);
+    }
+    
+    delay(searchTime);
+    searchStage++;
+    
+    // Increase search radius over time
+    if (searchStage % 2 == 0) {
+      searchTime += 50;
+    }
+    
+    // Reset if search gets too wide
+    if (searchTime > 500) {
+      searchTime = 100;
+    }
+  }
+  
+  // Check if we found the line again
+  readSensors(true);
+  getLinePosition();
+}
+
+/**
+ * Control both motors
+ * @param leftSpeed Left motor speed (-MaxSpeed to MaxSpeed)
+ * @param rightSpeed Right motor speed (-MaxSpeed to MaxSpeed)
+ */
+void motor(int leftSpeed, int rightSpeed) {
+  // Control left motor
+  if (leftSpeed >= 0) {
+    // Forward motion
+    analogWrite(lmf, leftSpeed);
+    analogWrite(lmb, 0);
+  } else {
+    // Backward motion
+    analogWrite(lmf, 0);
+    analogWrite(lmb, -leftSpeed);
+  }
+  
+  // Control right motor
+  if (rightSpeed >= 0) {
+    // Forward motion
+    analogWrite(rmf, rightSpeed);
+    analogWrite(rmb, 0);
+  } else {
+    // Backward motion
+    analogWrite(rmf, 0);
+    analogWrite(rmb, -rightSpeed);
+  }
 }
 
