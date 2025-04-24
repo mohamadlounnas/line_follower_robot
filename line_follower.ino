@@ -1,6 +1,6 @@
 /**
  * Simple and Robust Line Follower
- * Uses a weighted approach instead of PID for reliable line tracking
+ * Uses edge following approach - follows right edge of the line
  */
 
 // Motor pins
@@ -12,20 +12,19 @@
 // Constants for line following
 #define SENSOR_COUNT 8
 #define THRESHOLD 760           // Threshold to detect black line
-#define CENTER_POSITION 4.5     // Center position (between sensors 4 and 5)
+#define TARGET_SENSOR 6         // Target sensor to keep on the line (right edge following)
 
 // Speed settings
-#define BASE_SPEED 85           // Normal speed
-#define TURN_SPEED 70           // Speed during turns
-#define ROTATION_SPEED 100      // Speed for on-the-spot rotation
+#define BASE_SPEED 95           // Normal speed
+#define TURN_SPEED 75           // Speed during turns
+#define SEARCH_TIMEOUT 2000     // Max time to search for line (ms)
 
 // Time constants
-#define STRAIGHT_RESET_TIME 1000 // Time (ms) to reset direction memory after going straight
+#define STRAIGHT_RESET_TIME 200 // Time (ms) to reset direction memory after going straight
 
 // Variables
 int sensor[SENSOR_COUNT];       // Array to store sensor values
-float linePosition = CENTER_POSITION; // Current line position (1-8)
-char lineDirection = 'C';       // 'L' for left, 'R' for right, 'C' for center, 'N' for none
+char lineDirection = 'N';       // 'L' for left, 'R' for right, 'N' for none
 char lastLineDirection = 'N';   // Last known direction of the line
 unsigned long lastLineTime = 0; // Last time the line was detected
 boolean isTurning = false;      // Flag to indicate we're in a turn
@@ -51,7 +50,7 @@ void setup() {
  * Main loop - runs continuously
  */
 void loop() {
-  // Read sensors and update line position
+  // Read sensors
   readSensors();
   
   // Track straight movement for direction reset
@@ -59,19 +58,8 @@ void loop() {
   
   // Determine what to do based on sensor readings
   if (isLineDetected()) {
-    // If in a full turn, only exit when properly centered on the line
-    if (isTurning) {
-      if (isCentered()) {
-        isTurning = false;
-      } else {
-        // Continue the turn until centered
-        continueTurn(lastLineDirection);
-        return;
-      }
-    }
-    
-    // Normal line following
-    followLine();
+    // Line is detected - continue with edge following
+    followLineEdge();
   } else {
     // No line detected - handle line loss
     handleLineLoss();
@@ -83,10 +71,11 @@ void loop() {
 
 /**
  * Track how long robot has been going straight to reset direction memory
+ * Resets lastLineDirection after STRAIGHT_RESET_TIME (0.2s)
  */
 void updateStraightTimer() {
-  // Check if robot is currently centered on the line and not turning
-  if (isCentered() && !isTurning) {
+  // Check if robot is currently moving straight (target sensor on line)
+  if (sensor[TARGET_SENSOR] == 1 && !isTurning) {
     // Start tracking straight movement if we weren't already
     if (!isGoingStraight) {
       straightStartTime = millis();
@@ -103,7 +92,7 @@ void updateStraightTimer() {
 }
 
 /**
- * Reads all IR sensors and calculates line position
+ * Reads all IR sensors
  */
 void readSensors() {
   // Read all 8 IR sensors
@@ -116,42 +105,59 @@ void readSensors() {
   sensor[6] = analogRead(A6);
   sensor[7] = analogRead(A7);
   
-  // Calculate weighted position
-  float weightedSum = 0;
-  int activeSensors = 0;
-  
+  // Convert to binary (0/1)
   for (int i = 0; i < SENSOR_COUNT; i++) {
-    // Convert to binary (0/1)
-    int value = (sensor[i] > THRESHOLD) ? 1 : 0;
-    sensor[i] = value;
-    
-    // Add to weighted sum (position 1-8)
-    if (value == 1) {
-      weightedSum += (i + 1);
-      activeSensors++;
-    }
+    sensor[i] = (sensor[i] > THRESHOLD) ? 1 : 0;
   }
   
-  // Update line position if we have active sensors
-  if (activeSensors > 0) {
-    linePosition = weightedSum / activeSensors;
+  // Update last time line was detected if any sensor sees the line
+  if (isLineDetected()) {
     lastLineTime = millis();
     
-    // Update line direction
-    if (linePosition < 3.5) {
-      lineDirection = 'L';
-    } else if (linePosition > 5.5) {
-      lineDirection = 'R';
-    } else {
-      lineDirection = 'C';
+    // Update line direction based on which sensors detect the line
+    updateLineDirection();
+  }
+}
+
+/**
+ * Updates the direction of the line based on sensor readings
+ */
+void updateLineDirection() {
+  // If target sensor is on, we're good (on the right edge)
+  if (sensor[TARGET_SENSOR] == 1) {
+    lineDirection = 'C'; // centered on edge
+  }
+  // If sensors to the left of target are on, line is to the left
+  else if (sensor[TARGET_SENSOR-1] == 1 || sensor[TARGET_SENSOR-2] == 1) {
+    lineDirection = 'L';
+    lastLineDirection = 'L';
+  }
+  // If sensor to the right of target is on, line is to the right
+  else if (sensor[7] == 1) {
+    lineDirection = 'R';
+    lastLineDirection = 'R';
+  }
+  // If other sensors detect the line, determine direction
+  else if (isLineDetected()) {
+    // Count sensors on left vs right side
+    int leftCount = 0;
+    int rightCount = 0;
+    
+    for (int i = 0; i < TARGET_SENSOR-2; i++) {
+      if (sensor[i] == 1) leftCount++;
     }
     
-    // Update last direction only when we have a clear reading (not centered)
-    if (lineDirection != 'C') {
-      lastLineDirection = lineDirection;
+    for (int i = TARGET_SENSOR+1; i < SENSOR_COUNT; i++) {
+      if (sensor[i] == 1) rightCount++;
     }
-  } else {
-    lineDirection = 'N';
+    
+    if (leftCount > rightCount) {
+      lineDirection = 'L';
+      lastLineDirection = 'L';
+    } else if (rightCount > 0) {
+      lineDirection = 'R';
+      lastLineDirection = 'R';
+    }
   }
 }
 
@@ -168,14 +174,6 @@ bool isLineDetected() {
 }
 
 /**
- * Checks if the robot is centered on the line
- */
-bool isCentered() {
-  return (sensor[3] == 1 || sensor[4] == 1) && 
-         (linePosition >= 3.5 && linePosition <= 5.5);
-}
-
-/**
  * Checks if all sensors detect black (junction or end of track)
  */
 bool isAllBlack() {
@@ -187,30 +185,14 @@ bool isAllBlack() {
 }
 
 /**
- * Basic line following function that adjusts speed based on line position
+ * Edge following function that keeps sensor TARGET_SENSOR on the line
  */
-void followLine() {
-  // Calculate how far off center we are (0.0 to 3.5)
-  float offset = abs(linePosition - CENTER_POSITION);
+void followLineEdge() {
+  // Check for special cases first
   
-  // Special cases for turns
-  if (sensor[0] == 1 && !isRightSensorActive() && !isCenterSensorActive()) {
-    // Hard left turn detected
-    lastLineDirection = 'L';
-    turnLeft();
-    return;
-  }
-  
-  if (sensor[7] == 1 && !isLeftSensorActive() && !isCenterSensorActive()) {
-    // Hard right turn detected
-    lastLineDirection = 'R';
-    turnRight();
-    return;
-  }
-  
-  // Check for all black (junction)
+  // All black - might be a junction
   if (isAllBlack()) {
-    delay(20); // Brief delay to make sure it's a junction
+    delay(10); // Brief delay to confirm reading
     readSensors();
     
     if (isAllBlack()) {
@@ -226,30 +208,63 @@ void followLine() {
     }
   }
   
-  // Normal line following - adjust speeds based on position
-  int leftSpeed, rightSpeed;
-  
-  // Line is to the left - FIXED DIRECTION LOGIC
-  if (linePosition < CENTER_POSITION) {
-    float factor = map(offset, 0, 3.5, 0, BASE_SPEED * 0.7);
-    // When line is to the left, SLOW DOWN the left motor, speed up right motor
-    leftSpeed = BASE_SPEED - factor;
-    rightSpeed = BASE_SPEED;
-  } 
-  // Line is to the right - FIXED DIRECTION LOGIC
-  else {
-    float factor = map(offset, 0, 3.5, 0, BASE_SPEED * 0.7);
-    // When line is to the right, SLOW DOWN the right motor, speed up left motor
-    leftSpeed = BASE_SPEED;
-    rightSpeed = BASE_SPEED - factor;
+  // Edge following logic
+  if (sensor[TARGET_SENSOR] == 1) {
+    // Target sensor on line - go straight
+    setMotors(BASE_SPEED, BASE_SPEED);
+    isTurning = false;
   }
-  
-  // Ensure minimum speed
-  if (leftSpeed < TURN_SPEED) leftSpeed = TURN_SPEED;
-  if (rightSpeed < TURN_SPEED) rightSpeed = TURN_SPEED;
-  
-  // Set motor speeds
-  setMotors(leftSpeed, rightSpeed);
+  else if (sensor[TARGET_SENSOR-1] == 1 || sensor[TARGET_SENSOR-2] == 1) {
+    // Line is to the left of target - turn left
+    // Left wheel slower or stopped, right wheel at normal speed
+    setMotors(0, BASE_SPEED);
+    lastLineDirection = 'L';
+    isTurning = true;
+  }
+  else if (sensor[7] == 1) {
+    // Line is to the right of target - turn right
+    // Right wheel slower or stopped, left wheel at normal speed
+    setMotors(BASE_SPEED, 0);
+    lastLineDirection = 'R';
+    isTurning = true;
+  }
+  else {
+    // No sensor on right edge - check other sensors
+    int leftActive = 0;
+    int rightActive = 0;
+    
+    // Count sensors active on left and right side
+    for (int i = 0; i < 3; i++) {
+      if (sensor[i] == 1) leftActive++;
+    }
+    
+    for (int i = 3; i < TARGET_SENSOR; i++) {
+      if (sensor[i] == 1) rightActive++;
+    }
+    
+    if (leftActive > 0) {
+      // Line is far to the left - sharp left turn
+      setMotors(0, BASE_SPEED);
+      lastLineDirection = 'L';
+      isTurning = true;
+    } else if (rightActive > 0) {
+      // Line is between center and target - gentle right turn
+      setMotors(BASE_SPEED, TURN_SPEED);
+      lastLineDirection = 'R';
+      isTurning = true;
+    } else {
+      // No clear indication - use last direction
+      if (lastLineDirection == 'L') {
+        setMotors(0, BASE_SPEED);
+      } else if (lastLineDirection == 'R') {
+        setMotors(BASE_SPEED, 0);
+      } else {
+        // No direction memory - go straight
+        setMotors(BASE_SPEED, BASE_SPEED);
+      }
+      isTurning = true;
+    }
+  }
 }
 
 /**
@@ -258,106 +273,71 @@ void followLine() {
 void handleLineLoss() {
   // If we just lost the line (within last 100ms), continue same direction
   if (millis() - lastLineTime < 100) {
-    // FIXED DIRECTION LOGIC for recovery
     if (lastLineDirection == 'L') {
-      // Line was to the left, so turn left (left motor slower than right)
-      setMotors(TURN_SPEED, BASE_SPEED);
+      // Turn left (left wheel stopped, right wheel forward)
+      setMotors(0, BASE_SPEED);
     } else if (lastLineDirection == 'R') {
-      // Line was to the right, so turn right (right motor slower than left)
-      setMotors(BASE_SPEED, TURN_SPEED);
+      // Turn right (right wheel stopped, left wheel forward)
+      setMotors(BASE_SPEED, 0);
     } else {
-      setMotors(BASE_SPEED, BASE_SPEED);
+      // No direction memory - search pattern
+      searchPattern();
     }
   } else {
-    // Line has been lost for a while, start a rotation to find it
-    isTurning = true;
-    
-    // FIXED DIRECTION LOGIC for rotation
-    if (lastLineDirection == 'L') {
-      rotateLeft();
-    } else if (lastLineDirection == 'R') {
-      rotateRight();
+    // Line has been lost for a while - search pattern
+    searchPattern();
+  }
+  
+  isTurning = true;
+}
+
+/**
+ * Search pattern to find the line when completely lost
+ */
+void searchPattern() {
+  static unsigned long searchStartTime = 0;
+  static boolean searchStarted = false;
+  static char searchDirection = 'L';
+  
+  // Initialize search if we haven't already
+  if (!searchStarted) {
+    searchStartTime = millis();
+    searchStarted = true;
+    searchDirection = 'L'; // Start with left search
+  }
+  
+  // Time-based search pattern
+  unsigned long searchTime = millis() - searchStartTime;
+  
+  if (searchTime < 1000) {
+    // First try left for 1 second
+    setMotors(0, BASE_SPEED);
+  } 
+  else if (searchTime < 3000) {
+    // Then try right for 2 seconds
+    setMotors(BASE_SPEED, 0);
+  }
+  else {
+    // Then alternate with wider sweeps
+    if (searchDirection == 'L') {
+      setMotors(0, BASE_SPEED);
+      if (searchTime % 1500 == 0) searchDirection = 'R';
     } else {
-      // If we have no direction memory, try a full scan
-      fullScan();
+      setMotors(BASE_SPEED, 0);
+      if (searchTime % 1500 == 0) searchDirection = 'L';
     }
   }
-}
-
-/**
- * Full scan rotation to find the line when direction is unknown
- */
-void fullScan() {
-  // First try a left rotation for a short time
-  unsigned long scanStartTime = millis();
   
-  // Try rotating left for 500ms
-  while (millis() - scanStartTime < 500) {
-    rotateLeft();
-    readSensors();
-    if (isLineDetected()) return;
-    delay(10);
+  // If search has gone on too long, stop and reset
+  if (searchTime > SEARCH_TIMEOUT) {
+    stopMotors();
+    searchStarted = false;
   }
   
-  // If line not found, try right rotation for 1 second
-  scanStartTime = millis();
-  while (millis() - scanStartTime < 1000) {
-    rotateRight();
-    readSensors();
-    if (isLineDetected()) return;
-    delay(10);
+  // If we found the line, reset search state
+  if (isLineDetected()) {
+    searchStarted = false;
   }
-  
-  // If still not found, do a slower full scan
-  rotateLeft();
-}
-
-/**
- * Continue turn in the given direction
- */
-void continueTurn(char direction) {
-  if (direction == 'L') {
-    rotateLeft();
-  } else if (direction == 'R') {
-    rotateRight();
-  } else {
-    // If no direction known, do a full scan
-    fullScan();
-  }
-}
-
-/**
- * Start a full left turn
- */
-void turnLeft() {
-  isTurning = true;
-  isGoingStraight = false;
-  lastLineDirection = 'L';
-  rotateLeft();
-}
-
-/**
- * Start a full right turn
- */
-void turnRight() {
-  isTurning = true;
-  isGoingStraight = false;
-  lastLineDirection = 'R';
-  rotateRight();
-}
-
-/**
- * Rotate left (in place) to find the line
- */
-void rotateLeft() {
-  setMotors(-ROTATION_SPEED, ROTATION_SPEED);
-}
-
-/**
- * Rotate right (in place) to find the line
- */
-void rotateRight() {
-  setMotors(ROTATION_SPEED, -ROTATION_SPEED);
 }
 
 /**
@@ -368,63 +348,38 @@ void stopMotors() {
 }
 
 /**
- * Set motor speeds directly
+ * Set motor speeds - forward only, no backward motion
+ * @param leftSpeed Left motor speed (0-255)
+ * @param rightSpeed Right motor speed (0-255)
  */
 void setMotors(int leftSpeed, int rightSpeed) {
-  // Left motor
-  if (leftSpeed >= 0) {
-    analogWrite(LEFT_MOTOR_FORWARD, leftSpeed);
-    analogWrite(LEFT_MOTOR_BACKWARD, 0);
-  } else {
-    analogWrite(LEFT_MOTOR_FORWARD, 0);
-    analogWrite(LEFT_MOTOR_BACKWARD, -leftSpeed);
-  }
+  // Ensure values are positive (forward only) and within range
+  leftSpeed = constrain(leftSpeed, 0, 255);
+  rightSpeed = constrain(rightSpeed, 0, 255);
   
-  // Right motor
-  if (rightSpeed >= 0) {
-    analogWrite(RIGHT_MOTOR_FORWARD, rightSpeed);
-    analogWrite(RIGHT_MOTOR_BACKWARD, 0);
-  } else {
-    analogWrite(RIGHT_MOTOR_FORWARD, 0);
-    analogWrite(RIGHT_MOTOR_BACKWARD, -rightSpeed);
-  }
+  // Left motor - forward only
+  analogWrite(LEFT_MOTOR_FORWARD, leftSpeed);
+  analogWrite(LEFT_MOTOR_BACKWARD, 0);
+  
+  // Right motor - forward only
+  analogWrite(RIGHT_MOTOR_FORWARD, rightSpeed);
+  analogWrite(RIGHT_MOTOR_BACKWARD, 0);
 }
 
 /**
- * Helper function to check if any left sensors are active
+ * Constrain a value between a minimum and maximum
  */
-bool isLeftSensorActive() {
-  return (sensor[0] == 1 || sensor[1] == 1 || sensor[2] == 1);
-}
-
-/**
- * Helper function to check if any right sensors are active
- */
-bool isRightSensorActive() {
-  return (sensor[5] == 1 || sensor[6] == 1 || sensor[7] == 1);
-}
-
-/**
- * Helper function to check if any center sensors are active
- */
-bool isCenterSensorActive() {
-  return (sensor[3] == 1 || sensor[4] == 1);
-}
-
-/**
- * Map a float value from one range to another
- */
-float map(float x, float in_min, float in_max, float out_min, float out_max) {
-  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+int constrain(int value, int min, int max) {
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
 }
 
 /**
  * Print debug information to serial monitor
  */
 void printDebugInfo() {
-  Serial.print("Position: ");
-  Serial.print(linePosition);
-  Serial.print(" | Direction: ");
+  Serial.print("Direction: ");
   Serial.print(lineDirection);
   Serial.print(" | Last: ");
   Serial.print(lastLineDirection);
@@ -441,6 +396,8 @@ void printDebugInfo() {
   
   for (int i = 0; i < SENSOR_COUNT; i++) {
     Serial.print(sensor[i]);
+    if (i == TARGET_SENSOR) Serial.print("*"); // Mark target sensor
+    else Serial.print(" ");
   }
   
   Serial.println();
