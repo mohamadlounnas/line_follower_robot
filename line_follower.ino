@@ -1,9 +1,8 @@
 /**
- * Advanced Line Follower Robot
+ * Simple Line Follower Robot
  * 
- * This code provides a sophisticated implementation of a line follower robot
- * using an enhanced bang-bang control strategy with advanced recovery,
- * dynamic speed control, and anti-overshoot techniques.
+ * This code provides a robust implementation of a line follower robot
+ * using a bang-bang control strategy with max speed pulses.
  * 
  * Hardware Configuration:
  * - 8 IR sensors (A0-A7)
@@ -20,61 +19,39 @@
 // Debug mode
 #define DEBUG_MODE true  // Set to true for serial debugging information
 
-// Motor speed parameters
-#define MAX_SPEED 80           // Maximum forward speed
-#define TURN_SPEED 70          // Speed during regular turns
-#define SLOW_SPEED 40          // Speed during sharp or difficult turns
-#define RECOVERY_SPEED 60      // Speed during recovery
-#define BRAKE_SPEED 50         // Speed used for active braking (backward motion)
-#define APPROACH_SPEED 30      // Speed when approaching the line during recovery
-#define STOP_SPEED 0           // Complete stop
-
-// Advanced turning parameters
-#define QUICK_BRAKE_DURATION 40    // Duration of brake pulse in milliseconds
-#define BACKWARD_TURN_DURATION 60  // Duration of backward turning when recovering
-#define MIN_TURN_DURATION 50       // Minimum turn duration to ensure effect
-#define MAX_TURN_DURATION 150      // Maximum turn duration before checking sensors again
+// Motor parameters
+#define MAX_SPEED 80     // Maximum speed for motors (REDUCED from 120 for slower movement)
+#define TURN_FORWARD_SPEED 60  // Speed for the wheel going forward during a turn
+#define TURN_BACKWARD_SPEED 100 // Speed for the wheel going backward during a turn (faster than forward)
+#define STOP_SPEED 0      // Speed when stopped
 
 // Sensor parameters
-int SENSOR_THRESHOLD = 700;    // Threshold to distinguish black from white
-#define NUM_SENSORS 8          // Number of sensors being used
-#define IDEAL_POSITION 3.5     // Ideal position (center point for 8 sensors)
-#define MARGIN 0.6             // How far from ideal position before correction
+int SENSOR_THRESHOLD = 700;  // Threshold to distinguish black from white (adjust based on your sensors)
+#define NUM_SENSORS 8        // Number of sensors being used
+#define IDEAL_POSITION 3.5   // Ideal position (center point for 8 sensors)
+#define MARGIN 0.6          // How far from ideal position before correction (INCREASED from 0.5 for more stable movement)
 
 // Line tracking states
-#define ON_LINE 0              // Robot is centered on the line
-#define LINE_LEFT 1            // Line is to the left
-#define LINE_RIGHT 2           // Line is to the right
-#define LINE_LOST 3            // Line is completely lost
-#define SHARP_LEFT 4           // Line requires a sharp left turn
-#define SHARP_RIGHT 5          // Line requires a sharp right turn
-#define JUNCTION 6             // Junction detected (all sensors triggered)
-
-// Recovery and history
-#define HISTORY_SIZE 5         // Number of recent positions to remember
-float positionHistory[HISTORY_SIZE];  // Array to store recent positions
-int historyIndex = 0;          // Current index in history array
-bool wasOnLine = false;        // Whether the robot was on the line in previous iteration
-unsigned long lastLineDetection = 0;  // Time when line was last detected
-#define MAX_RECOVERY_TIME 3000 // Maximum time to spend in recovery before trying a new strategy
-#define RECOVERY_CHECK_INTERVAL 300 // How often to check sensors during extended recovery
+#define ON_LINE 0           // Robot is on the line
+#define LINE_LEFT 1         // Line is to the left
+#define LINE_RIGHT 2        // Line is to the right
+#define LINE_LOST 3         // Line is lost
 
 // Global variables
-int lineState = ON_LINE;       // Current line state
-int previousLineState = ON_LINE; // Previous line state
+int lineState = ON_LINE;    // Current line state
 int leftMotorSpeed, rightMotorSpeed;
 int sensorValues[NUM_SENSORS];   // Raw analog values
 int sensorDigital[NUM_SENSORS];  // Converted to 0 or 1
 float position = 0;              // Weighted average of sensor positions
 char lastTurnDirection = 'N';    // 'L' for left, 'R' for right, 'N' for not set
-unsigned long stateChangeTime = 0; // When the line state last changed
-bool overshootDetected = false;  // Flag for when overshoot is detected
-int recoveryPhase = 0;          // Phase of the recovery process
-unsigned long recoveryStartTime = 0; // When recovery started
+
+// Pulse timing
+unsigned long lastDirectionChange = 0;
+#define MIN_PULSE_DURATION 40  // Minimum duration for a correction pulse (ms) (INCREASED from 30 for more deliberate movements)
 
 // Debug variables
 unsigned long lastDebugTime = 0;
-#define DEBUG_INTERVAL 100     // Print debug info every 100ms
+#define DEBUG_INTERVAL 100  // Print debug info every 100ms
 
 void setup() {
   // Initialize motor control pins as outputs
@@ -86,15 +63,10 @@ void setup() {
   // Initialize serial communication for debugging
   if (DEBUG_MODE) {
     Serial.begin(9600);
-    Serial.println(F("Advanced Line Follower Robot - Debug Mode"));
+    Serial.println(F("Line Follower Robot - Debug Mode"));
     Serial.println(F("-----------------------------"));
     Serial.println(F("Wait 5 seconds before calibration..."));
-    Serial.println(F("ADVANCED CONTROL WITH ANTI-OVERSHOOT"));
-  }
-  
-  // Initialize position history
-  for (int i = 0; i < HISTORY_SIZE; i++) {
-    positionHistory[i] = IDEAL_POSITION;
+    Serial.println(F("BANG-BANG CONTROL WITH MAX SPEED PULSES"));
   }
   
   // Delay before starting (gives time to place robot on the line)
@@ -111,12 +83,8 @@ void loop() {
   // Read sensors and calculate position
   readSensors();
   
-  // Store position history
-  recordPositionHistory();
-  
-  // Determine line state and follow the line
-  determineLineState();
-  followLine();
+  // Run the main line following algorithm
+  followLineBangBang();
   
   // Print debug information if enabled
   if (DEBUG_MODE) {
@@ -151,31 +119,16 @@ void readSensors() {
   // Calculate position if at least one sensor detects the line
   if (sum > 0) {
     position = weightedSum / sum;
-    lastLineDetection = millis();
-    wasOnLine = true;
   } else {
-    // No line detected - position remains unchanged
-    wasOnLine = false;
+    // No line detected - use last known position
+    // Position remains unchanged
   }
 }
 
 /**
- * Store the recent position history for recovery purposes
+ * Main line following algorithm using bang-bang control with pulses
  */
-void recordPositionHistory() {
-  // Only record history if line is detected
-  if (wasOnLine) {
-    positionHistory[historyIndex] = position;
-    historyIndex = (historyIndex + 1) % HISTORY_SIZE;
-  }
-}
-
-/**
- * Analyze sensor readings to determine the current line state
- */
-void determineLineState() {
-  previousLineState = lineState;
-  
+void followLineBangBang() {
   // Check if any sensor sees the line
   bool lineDetected = false;
   for (int i = 0; i < NUM_SENSORS; i++) {
@@ -186,295 +139,128 @@ void determineLineState() {
   }
   
   if (lineDetected) {
-    // Check for junction (all or most sensors active)
-    int activeCount = 0;
-    for (int i = 0; i < NUM_SENSORS; i++) {
-      activeCount += sensorDigital[i];
-    }
-    
-    if (activeCount >= 6) {
-      lineState = JUNCTION;
-    }
-    // Check for sharp turns (only edge sensors active)
-    else if (sensorDigital[0] == 1 && sensorDigital[1] == 1 && sensorDigital[NUM_SENSORS-1] == 0) {
-      lineState = SHARP_LEFT;
-      lastTurnDirection = 'L';
-    }
-    else if (sensorDigital[NUM_SENSORS-1] == 1 && sensorDigital[NUM_SENSORS-2] == 1 && sensorDigital[0] == 0) {
-      lineState = SHARP_RIGHT;
-      lastTurnDirection = 'R';
-    }
-    // Regular positioning
-    else if (position < (IDEAL_POSITION - MARGIN)) {
+    // Determine line position state
+    if (position < (IDEAL_POSITION - MARGIN)) {
+      // Line is to the left
       lineState = LINE_LEFT;
       lastTurnDirection = 'L';
-    }
+    } 
     else if (position > (IDEAL_POSITION + MARGIN)) {
+      // Line is to the right
       lineState = LINE_RIGHT;
       lastTurnDirection = 'R';
-    }
+    } 
     else {
+      // Line is centered
       lineState = ON_LINE;
     }
     
-    // Reset recovery phase when line is detected
-    recoveryPhase = 0;
-  }
+    // Apply bang-bang control with pulses
+    applyBangBangControl();
+  } 
   else {
+    // Line is lost
     lineState = LINE_LOST;
-  }
-  
-  // Record when the state changed
-  if (lineState != previousLineState) {
-    stateChangeTime = millis();
-  }
-  
-  // Detect potential overshoot
-  detectOvershoot();
-}
-
-/**
- * Detect potential overshoot conditions based on sudden state changes
- */
-void detectOvershoot() {
-  overshootDetected = false;
-  
-  // Detect when the robot crosses from one side to the other very quickly
-  // This indicates potential overshoot
-  if ((previousLineState == LINE_LEFT && lineState == LINE_RIGHT) || 
-      (previousLineState == LINE_RIGHT && lineState == LINE_LEFT)) {
-    overshootDetected = true;
-    if (DEBUG_MODE) {
-      Serial.println(F("OVERSHOOT DETECTED!"));
-    }
+    recoverLine();
   }
 }
 
 /**
- * Main line following algorithm with anti-overshoot capabilities
+ * Apply bang-bang control strategy based on line state
  */
-void followLine() {
+void applyBangBangControl() {
   unsigned long currentTime = millis();
   
   switch (lineState) {
     case ON_LINE:
-      // Centered on line - go straight
+      // Line is centered - go straight at max speed
       setMotors(MAX_SPEED, MAX_SPEED);
       break;
       
     case LINE_LEFT:
-      if (overshootDetected) {
-        // Apply anti-overshoot correction with brief brake
-        applyBrake();
-        setMotors(SLOW_SPEED, TURN_SPEED);
-      } else {
-        // Normal left correction
-        setMotors(STOP_SPEED, TURN_SPEED);
-        
-        // Apply brief backward motion after correction threshold
-        if (currentTime - stateChangeTime > MIN_TURN_DURATION) {
-          // Check if correction has been active long enough
-          if (currentTime - stateChangeTime > MAX_TURN_DURATION) {
-            readSensors();
-            determineLineState();
-          }
-        }
-      }
+      // Line is to the left - make sharp left turn
+      // Left wheel backward at higher speed, right wheel forward at lower speed
+      setMotors(-TURN_BACKWARD_SPEED, TURN_FORWARD_SPEED);
+      lastDirectionChange = currentTime;
       break;
       
     case LINE_RIGHT:
-      if (overshootDetected) {
-        // Apply anti-overshoot correction with brief brake
-        applyBrake();
-        setMotors(TURN_SPEED, SLOW_SPEED);
-      } else {
-        // Normal right correction
-        setMotors(TURN_SPEED, STOP_SPEED);
-        
-        // Apply brief backward motion after correction threshold
-        if (currentTime - stateChangeTime > MIN_TURN_DURATION) {
-          // Check if correction has been active long enough
-          if (currentTime - stateChangeTime > MAX_TURN_DURATION) {
-            readSensors();
-            determineLineState();
-          }
-        }
-      }
+      // Line is to the right - make sharp right turn
+      // Left wheel forward at lower speed, right wheel backward at higher speed
+      setMotors(TURN_FORWARD_SPEED, -TURN_BACKWARD_SPEED);
+      lastDirectionChange = currentTime;
       break;
-      
-    case SHARP_LEFT:
-      // Execute a sharp left turn with active braking to prevent overshoot
-      applyBrake();
-      setMotors(-BRAKE_SPEED, TURN_SPEED); // Apply backward motion to left motor
-      delay(50); // Allow time for the turn
-      break;
-      
-    case SHARP_RIGHT:
-      // Execute a sharp right turn with active braking to prevent overshoot
-      applyBrake();
-      setMotors(TURN_SPEED, -BRAKE_SPEED); // Apply backward motion to right motor
-      delay(50); // Allow time for the turn
-      break;
-      
-    case JUNCTION:
-      // At a junction, slow down briefly then continue forward
-      setMotors(SLOW_SPEED, SLOW_SPEED);
-      delay(100);
-      setMotors(MAX_SPEED, MAX_SPEED);
-      break;
-      
-    case LINE_LOST:
-      // Start recovery process
-      if (recoveryPhase == 0) {
-        recoveryStartTime = currentTime;
-        recoveryPhase = 1;
-      }
-      advancedRecovery(currentTime);
-      break;
+  }
+  
+  // Ensure minimum pulse duration for corrections
+  if ((lineState == LINE_LEFT || lineState == LINE_RIGHT) && 
+      (currentTime - lastDirectionChange < MIN_PULSE_DURATION)) {
+    // Continue the correction for at least MIN_PULSE_DURATION milliseconds
+    delay(MIN_PULSE_DURATION - (currentTime - lastDirectionChange));
   }
 }
 
 /**
- * Apply a quick brake by briefly reversing the motors
+ * Attempt to recover the line when it's lost
  */
-void applyBrake() {
-  // Apply reverse power to both motors briefly to counter momentum
-  setMotors(-BRAKE_SPEED, -BRAKE_SPEED);
-  delay(QUICK_BRAKE_DURATION);
-  setMotors(STOP_SPEED, STOP_SPEED);
-  delay(20); // Brief pause after braking
-}
-
-/**
- * Advanced recovery process with multiple strategies
- */
-void advancedRecovery(unsigned long currentTime) {
-  // If we just lost the line, first try to find it based on the last known direction
-  if (recoveryPhase == 1) {
-    if (DEBUG_MODE) {
-      Serial.println(F("Recovery Phase 1: Initial Direction Search"));
-    }
-    
-    // First try a gentle direction search
-    if (lastTurnDirection == 'L') {
-      setMotors(APPROACH_SPEED, RECOVERY_SPEED);
-    } else if (lastTurnDirection == 'R') {
-      setMotors(RECOVERY_SPEED, APPROACH_SPEED);
-    } else {
-      // If no known direction, try a small back-and-forth movement
-      setMotors(-SLOW_SPEED, SLOW_SPEED);
-      delay(50);
-      setMotors(SLOW_SPEED, -SLOW_SPEED);
-      delay(50);
-    }
-    
-    // Check if line is found
-    readSensors();
-    for (int i = 0; i < NUM_SENSORS; i++) {
-      if (sensorDigital[i] == 1) {
-        if (DEBUG_MODE) {
-          Serial.println(F("Line found in Phase 1"));
-        }
-        return;
-      }
-    }
-    
-    // If we've spent enough time in phase 1, move to phase 2
-    if (currentTime - recoveryStartTime > 500) {
-      recoveryPhase = 2;
-      if (DEBUG_MODE) {
-        Serial.println(F("Moving to Recovery Phase 2"));
-      }
+void recoverLine() {
+  if (DEBUG_MODE) {
+    Serial.println(F("Line lost! Attempting recovery..."));
+  }
+  
+  // First check if all sensors are on the line (junction or cross)
+  bool allOnLine = true;
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    if (sensorDigital[i] == 0) {
+      allOnLine = false;
+      break;
     }
   }
   
-  // Phase 2: Try backtracking to last known good position
-  else if (recoveryPhase == 2) {
-    if (DEBUG_MODE) {
-      Serial.println(F("Recovery Phase 2: Backtracking"));
-    }
-    
-    // Back up slightly
-    setMotors(-SLOW_SPEED, -SLOW_SPEED);
-    delay(200);
+  if (allOnLine) {
+    // All sensors see black - could be a junction or cross
+    // Stop briefly and then continue forward
     setMotors(STOP_SPEED, STOP_SPEED);
+    delay(50);
+    setMotors(MAX_SPEED, MAX_SPEED);
+    return;
+  }
+  
+  // Turn in the last known direction of the line using sharper turns
+  if (lastTurnDirection == 'L') {
+    // Sharp left turn to find the line
+    setMotors(-TURN_BACKWARD_SPEED, TURN_FORWARD_SPEED);
+  } else if (lastTurnDirection == 'R') {
+    // Sharp right turn to find the line
+    setMotors(TURN_FORWARD_SPEED, -TURN_BACKWARD_SPEED);
+  } else {
+    // No last direction known, rotate clockwise sharply
+    setMotors(TURN_FORWARD_SPEED, -TURN_BACKWARD_SPEED);
+  }
+  
+  // Keep turning until a sensor detects the line
+  while (true) {
+    readSensors();
     
-    // Try rotating based on the last known position
-    float lastGoodPosition = positionHistory[(historyIndex + HISTORY_SIZE - 1) % HISTORY_SIZE];
-    
-    if (lastGoodPosition < IDEAL_POSITION) {
-      // Line was to the left
-      setMotors(-SLOW_SPEED, RECOVERY_SPEED);
-    } else {
-      // Line was to the right
-      setMotors(RECOVERY_SPEED, -SLOW_SPEED);
+    // Check if any middle sensor sees the line
+    if (sensorDigital[3] == 1 || sensorDigital[4] == 1) {
+      // Line found, resume normal following
+      break;
     }
     
-    // Check sensors periodically
-    delay(100);
-    readSensors();
+    // Check if any sensor sees the line
     for (int i = 0; i < NUM_SENSORS; i++) {
       if (sensorDigital[i] == 1) {
+        // Line found, resume normal following
         if (DEBUG_MODE) {
-          Serial.println(F("Line found in Phase 2"));
+          Serial.println(F("Line recovered!"));
         }
         return;
       }
     }
     
-    // If we've spent enough time in phase 2, move to phase 3
-    if (currentTime - recoveryStartTime > 1500) {
-      recoveryPhase = 3;
-      if (DEBUG_MODE) {
-        Serial.println(F("Moving to Recovery Phase 3"));
-      }
-    }
-  }
-  
-  // Phase 3: Systematic sweep
-  else if (recoveryPhase == 3) {
-    if (DEBUG_MODE) {
-      Serial.println(F("Recovery Phase 3: Systematic Sweep"));
-    }
-    
-    // Perform a systematic full rotation to find the line
-    // Start with the last known direction
-    if (lastTurnDirection == 'L' || currentTime % 2000 < 1000) {
-      setMotors(-RECOVERY_SPEED, RECOVERY_SPEED);
-    } else {
-      setMotors(RECOVERY_SPEED, -RECOVERY_SPEED);
-    }
-    
-    // Check sensors periodically
-    if (currentTime % RECOVERY_CHECK_INTERVAL < 20) {
-      readSensors();
-      for (int i = 0; i < NUM_SENSORS; i++) {
-        if (sensorDigital[i] == 1) {
-          if (DEBUG_MODE) {
-            Serial.println(F("Line found in Phase 3"));
-          }
-          // Apply brake to stop rotation when line is found
-          applyBrake();
-          return;
-        }
-      }
-    }
-    
-    // If we've spent too long in recovery, reset and try a different strategy
-    if (currentTime - recoveryStartTime > MAX_RECOVERY_TIME) {
-      // Reset recovery and change the direction
-      recoveryPhase = 1;
-      recoveryStartTime = currentTime;
-      if (lastTurnDirection == 'L') {
-        lastTurnDirection = 'R';
-      } else {
-        lastTurnDirection = 'L';
-      }
-      
-      if (DEBUG_MODE) {
-        Serial.println(F("Reset recovery - changing direction"));
-      }
-    }
+    // Avoid blocking for too long
+    delay(10);
   }
 }
 
@@ -596,34 +382,20 @@ void printDebugInfo() {
   Serial.print(F("Position: "));
   Serial.print(position);
   Serial.print(F(" Line State: "));
-  
-  String stateName;
   switch (lineState) {
     case ON_LINE:
-      stateName = "ON_LINE";
+      Serial.println(F("ON_LINE"));
       break;
     case LINE_LEFT:
-      stateName = "LINE_LEFT";
+      Serial.println(F("LINE_LEFT"));
       break;
     case LINE_RIGHT:
-      stateName = "LINE_RIGHT";
+      Serial.println(F("LINE_RIGHT"));
       break;
     case LINE_LOST:
-      stateName = "LINE_LOST (Phase ";
-      stateName += recoveryPhase;
-      stateName += ")";
-      break;
-    case SHARP_LEFT:
-      stateName = "SHARP_LEFT";
-      break;
-    case SHARP_RIGHT:
-      stateName = "SHARP_RIGHT";
-      break;
-    case JUNCTION:
-      stateName = "JUNCTION";
+      Serial.println(F("LINE_LOST"));
       break;
   }
-  Serial.println(stateName);
   
   // Print motor speeds
   Serial.print(F("Motors L/R: "));
