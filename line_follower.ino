@@ -17,20 +17,20 @@
   float c; // Position value (weighted average of sensor readings)
   
   // Base speed configuration - will be adjusted dynamically
-  int base_speed = 110;            // Base speed for straight lines
-  int min_speed = 70;              // Minimum speed during sharp turns
-  int max_speed = 150;             // Maximum speed on straight sections
+  int base_speed = 95;             // Reduced base speed for better control
+  int min_speed = 65;              // Minimum speed during sharp turns
+  int max_speed = 130;             // Maximum speed on straight sections
   int left_motor_speed, right_motor_speed;  // Current motor speeds
   int left_motor, right_motor;
   
   // PID constants - reduced to minimize vibration
-  int kp = 25;    // Proportional constant (reduced from 35)
-  int kd = 20;    // Derivative constant (reduced from 45)
+  int kp = 25;    // Proportional constant
+  int kd = 20;    // Derivative constant
   int PID_value;
   float current_error, previous_error;
   
   // Turn settings
-  int turn_speed = 100;   // Reduced turn speed to avoid missing the line
+  int turn_speed = 100;   // Turn speed
   int final_approach_speed = 60;  // Slower speed when approaching line during turn
   char last_direction = 'n'; // 'n' for none, 'l' for left, 'r' for right
   int maxs = 180; // Maximum possible motor speed
@@ -45,10 +45,16 @@
   bool approach_phase = false;
   
   // Speed control variables
-  float speed_factor = 1.0;       // Dynamic speed adjustment factor
+  float speed_factor = 0.9;       // Starting with lower speed factor
   float error_threshold = 0.8;    // Error threshold for speed adjustment
   unsigned long last_speed_change = 0;  // Time tracking for smooth acceleration
   int accel_delay = 15;           // Delay between speed changes (ms)
+  
+  // Enhanced direction memory
+  #define DIRECTION_HISTORY_SIZE 5
+  char direction_history[DIRECTION_HISTORY_SIZE] = {'n', 'n', 'n', 'n', 'n'};
+  int direction_history_index = 0;
+  float position_history[DIRECTION_HISTORY_SIZE] = {4.5, 4.5, 4.5, 4.5, 4.5};
 
  
   void setup() {
@@ -64,6 +70,56 @@
 
   void loop() {
     Line_Follow();  // Line follow using PID
+  }
+
+  /**
+   * Updates directional memory with new direction information
+   * @param direction char representing direction ('l', 'r', 'c', 'n')
+   * @param position current position on line (1-8)
+   */
+  void update_direction_memory(char direction, float position) {
+    // Update circular buffer
+    direction_history[direction_history_index] = direction;
+    position_history[direction_history_index] = position;
+    
+    // Move to next position in circular buffer
+    direction_history_index = (direction_history_index + 1) % DIRECTION_HISTORY_SIZE;
+  }
+
+  /**
+   * Analyzes direction history to determine most likely direction
+   * @return char representing the determined direction ('l', 'r', 'n')
+   */
+  char determine_direction() {
+    int left_count = 0;
+    int right_count = 0;
+    float avg_position = 0;
+    
+    // Count occurrences of each direction and calculate average position
+    for (int i = 0; i < DIRECTION_HISTORY_SIZE; i++) {
+      if (direction_history[i] == 'l') left_count++;
+      else if (direction_history[i] == 'r') right_count++;
+      
+      avg_position += position_history[i];
+    }
+    avg_position /= DIRECTION_HISTORY_SIZE;
+    
+    // If clear majority of one direction, use that
+    if (left_count >= 3 && left_count > right_count) {
+      return 'l';
+    }
+    else if (right_count >= 3 && right_count > left_count) {
+      return 'r';
+    }
+    // Otherwise use average position to determine trend
+    else if (avg_position < 4.0) {
+      return 'l';
+    }
+    else if (avg_position > 5.0) {
+      return 'r';
+    }
+    // No clear direction
+    return 'n';
   }
 
   /**
@@ -102,6 +158,13 @@
       c = a / b;
       last_position = c; // Remember the last valid line position
       last_line_detected = millis(); // Update time when line was last detected
+      
+      // Update direction memory based on position
+      char current_dir = 'c'; // default to center
+      if (c < 3.8) current_dir = 'l';
+      else if (c > 5.2) current_dir = 'r';
+      
+      update_direction_memory(current_dir, c);
     }
   }
 
@@ -141,8 +204,8 @@
     float target_factor;
     
     if (error_magnitude < error_threshold) {
-      // On straight sections, gradually increase speed
-      target_factor = 1.0 - (error_magnitude / error_threshold) * 0.3;
+      // On straight sections, gradually increase speed but maintain max cap
+      target_factor = 0.9 - (error_magnitude / error_threshold) * 0.2;
     } else {
       // For turns, reduce speed based on how sharp the turn is
       target_factor = 0.7 - (error_magnitude - error_threshold) * 0.4;
@@ -153,7 +216,7 @@
     if (millis() - last_speed_change > accel_delay) {
       // Only update speed periodically to avoid jerking
       if (target_factor > speed_factor) {
-        speed_factor += 0.05; // Accelerate gradually
+        speed_factor += 0.03; // Accelerate more gradually
         if (speed_factor > target_factor) speed_factor = target_factor;
       } else {
         speed_factor -= 0.08; // Decelerate more quickly
@@ -212,25 +275,27 @@
         Serial.print(" Speed: ");
         Serial.print(left_motor_speed);
         Serial.print("/");
-        Serial.println(right_motor_speed);
+        Serial.print(right_motor_speed);
+        Serial.print(" Dir: ");
+        Serial.println(last_direction);
         
-        // Update last direction based on the current position
-        if (c < 3.5) {
-          last_direction = 'l'; // Line is on the left
-        } else if (c > 5.5) {
-          last_direction = 'r'; // Line is on the right
-        }
+        // Update last direction with smart direction determination
+        last_direction = determine_direction();
         
         // Check for sharp left/right turns
         if (sensor[0] == 1 && !right_line_detected() && !center_line_detected()) {
-          // Sharp left turn detected
+          // Sharp left turn detected - update direction memory
+          update_direction_memory('l', 1.0);
+          update_direction_memory('l', 1.0);  // Double weight for sharp turns
           last_direction = 'l';
           is_turning = true;
           approach_phase = false;
           left();
         }
         else if (sensor[7] == 1 && !left_line_detected() && !center_line_detected()) {
-          // Sharp right turn detected
+          // Sharp right turn detected - update direction memory
+          update_direction_memory('r', 8.0);
+          update_direction_memory('r', 8.0);  // Double weight for sharp turns
           last_direction = 'r';
           is_turning = true;
           approach_phase = false;
@@ -243,10 +308,13 @@
         
         // Check if we just recently lost the line (short-term recovery)
         if (millis() - last_line_detected < line_lost_timeout) {
-          // Continue in the same direction as before
-          if (last_position < 3.5) {
+          // Get smart direction determination
+          last_direction = determine_direction();
+          
+          // Continue in determined direction
+          if (last_direction == 'l') {
             motor(turn_speed/2, turn_speed);  // Moderate left turn
-          } else if (last_position > 5.5) {
+          } else if (last_direction == 'r') {
             motor(turn_speed, turn_speed/2);  // Moderate right turn
           } else {
             motor(turn_speed, turn_speed);  // Go straight
@@ -256,6 +324,9 @@
         else {
           is_turning = true;
           approach_phase = false;
+          
+          // Use smart direction determination for recovery
+          last_direction = determine_direction();
           
           if (last_direction == 'r') {
             right();
@@ -273,6 +344,9 @@
       
       // Left corner - multiple left sensors detecting
       if (!is_turning && sensor[0] == 1 && sensor[1] == 1 && !center_line_detected() && !right_line_detected()) {
+        // Strong left corner indication - update direction memory
+        update_direction_memory('l', 1.5);
+        update_direction_memory('l', 1.5);
         last_direction = 'l';
         is_turning = true;
         approach_phase = false;
@@ -281,6 +355,9 @@
       
       // Right corner - multiple right sensors detecting
       if (!is_turning && sensor[6] == 1 && sensor[7] == 1 && !center_line_detected() && !left_line_detected()) {
+        // Strong right corner indication - update direction memory
+        update_direction_memory('r', 7.5);
+        update_direction_memory('r', 7.5);
         last_direction = 'r';
         is_turning = true;
         approach_phase = false;
@@ -301,10 +378,14 @@
             sensor_reading(); // Wait until conditions change
           }
         } 
-        // If middle sensors show white but outer sensors show black, turn based on last direction
+        // If middle sensors show white but outer sensors show black, turn based on smart direction
         else if (sensor[0] == 0 && sensor[7] == 0) {
           is_turning = true;
           approach_phase = false;
+          
+          // Use smart direction determination
+          last_direction = determine_direction();
+          
           if (last_direction == 'l') {
             left();
           } else {
@@ -386,6 +467,9 @@
     // Final correction to center on the line
     motor(final_approach_speed, final_approach_speed);
     delay(20);
+    
+    // Update direction memory to reinforce the turn we just made
+    update_direction_memory('r', 6.0);
   }
 
   /**
@@ -449,6 +533,9 @@
     // Final correction to center on the line
     motor(final_approach_speed, final_approach_speed);
     delay(20);
+    
+    // Update direction memory to reinforce the turn we just made
+    update_direction_memory('l', 3.0);
   }
   
   /**
