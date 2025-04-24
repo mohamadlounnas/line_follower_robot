@@ -20,14 +20,14 @@
 #define DEBUG_MODE true  // Set to true for serial debugging information
 
 // Motor parameters
-#define MAX_SPEED 120     // Maximum speed for motors
+#define MAX_SPEED 80     // Maximum speed for motors (REDUCED from 120 for slower movement)
 #define STOP_SPEED 0      // Speed when stopped
 
 // Sensor parameters
 int SENSOR_THRESHOLD = 700;  // Threshold to distinguish black from white (adjust based on your sensors)
 #define NUM_SENSORS 8        // Number of sensors being used
 #define IDEAL_POSITION 3.5   // Ideal position (center point for 8 sensors)
-#define MARGIN 0.5          // How far from ideal position before correction
+#define MARGIN 0.6          // How far from ideal position before correction (INCREASED from 0.5 for more stable movement)
 
 // Line tracking states
 #define ON_LINE 0           // Robot is on the line
@@ -45,7 +45,7 @@ char lastTurnDirection = 'N';    // 'L' for left, 'R' for right, 'N' for not set
 
 // Pulse timing
 unsigned long lastDirectionChange = 0;
-#define MIN_PULSE_DURATION 30  // Minimum duration for a correction pulse (ms)
+#define MIN_PULSE_DURATION 40  // Minimum duration for a correction pulse (ms) (INCREASED from 30 for more deliberate movements)
 
 // Debug variables
 unsigned long lastDebugTime = 0;
