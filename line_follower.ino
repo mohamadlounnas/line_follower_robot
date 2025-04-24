@@ -1,237 +1,310 @@
 /**
- * Line Follower Robot
+ * Simple Line Follower Robot
  * 
- * This code implements a PID-based line following algorithm
- * for a robot with 8 IR reflectance sensors.
+ * This code provides a robust implementation of a line follower robot
+ * with extensive debugging capabilities and a simplified PID controller.
  * 
- * Hardware:
- * - 8 IR reflectance sensors on analog pins A0-A7
- * - Left motor: PWM on pins 9 (forward) and 6 (backward)
- * - Right motor: PWM on pins 10 (forward) and 11 (backward)
+ * Hardware Configuration:
+ * - 8 IR sensors (A0-A7)
+ * - Left motor: pins 9 (forward), 6 (backward)
+ * - Right motor: pins 10 (forward), 11 (backward)
  */
 
 // Motor pins
-#define LEFT_MOTOR_FORWARD 9
-#define LEFT_MOTOR_BACKWARD 6
-#define RIGHT_MOTOR_FORWARD 10
-#define RIGHT_MOTOR_BACKWARD 11
+#define RIGHT_MOTOR_FORWARD 10  // IN1
+#define RIGHT_MOTOR_BACKWARD 11 // IN2
+#define LEFT_MOTOR_FORWARD 9    // IN3
+#define LEFT_MOTOR_BACKWARD 6   // IN4
 
-// PID Constants
-#define KP 35        // Proportional constant
-#define KD 20        // Derivative constant - REDUCED to prevent overcompensation
-#define BASE_SPEED 80 // Base motor speed
-#define MAX_SPEED 120 // Maximum motor speed
-#define TURN_SPEED 100 // Speed when making recovery turns
+// Debug mode
+#define DEBUG_MODE true  // Set to true for serial debugging information
 
-// Sensor settings
-#define NUM_SENSORS 8
-#define SENSOR_THRESHOLD 760
-#define IDEAL_POSITION 3.5  // Center position (for 8 sensors indexed 0-7)
+// PID Controller Parameters
+float KP = 20;       // Proportional constant - start with a lower value
+float KD = 25;       // Derivative constant - adjust for smoothness
+float KI = 0;        // Integral constant - typically not needed for line following
 
-// Line detection thresholds
-#define LINE_THRESHOLD_LOW 1.0   // Below this is considered far left
-#define LINE_THRESHOLD_HIGH 6.0  // Above this is considered far right
+// Motor parameters
+int BASE_SPEED = 80;      // Base speed for both motors 
+int MAX_SPEED = 120;      // Maximum allowed motor speed
+int TURN_SPEED = 100;     // Speed when making turns
 
-// Variables for PID control
-float lastError = 0;
-float position = IDEAL_POSITION;
-int lastDirection = 0;  // Direction memory: -1 for left, 1 for right, 0 for straight
-unsigned long lastLineTime = 0; // Time when line was last detected
+// Sensor parameters
+int SENSOR_THRESHOLD = 700;  // Threshold to distinguish black from white (adjust based on your sensors)
+#define NUM_SENSORS 8        // Number of sensors being used
+#define IDEAL_POSITION 3.5   // Ideal position (center point for 8 sensors)
 
-// Function prototypes
-void readSensors(int *sensorValues, float *position);
-void calculatePID(float currentPosition, float *pidValue);
-void setMotorSpeeds(int leftSpeed, int rightSpeed);
-void recoverLine();
-void printSensorValues(int *sensorValues);
+// Global variables
+float currentError = 0;
+float previousError = 0;
+float integral = 0;
+int leftMotorSpeed, rightMotorSpeed;
+int sensorValues[NUM_SENSORS];   // Raw analog values
+int sensorDigital[NUM_SENSORS];  // Converted to 0 or 1
+float position = 0;              // Weighted average of sensor positions
+char lastTurnDirection = 'N';    // 'L' for left, 'R' for right, 'N' for not set
+
+// Debug variables
+unsigned long lastDebugTime = 0;
+#define DEBUG_INTERVAL 100  // Print debug info every 100ms
 
 void setup() {
-  // Initialize motor pins as outputs
+  // Initialize motor control pins as outputs
   pinMode(LEFT_MOTOR_FORWARD, OUTPUT);
   pinMode(LEFT_MOTOR_BACKWARD, OUTPUT);
   pinMode(RIGHT_MOTOR_FORWARD, OUTPUT);
   pinMode(RIGHT_MOTOR_BACKWARD, OUTPUT);
   
-  // Setup serial communication for debugging
-  Serial.begin(9600);
+  // Initialize serial communication for debugging
+  if (DEBUG_MODE) {
+    Serial.begin(9600);
+    Serial.println(F("Line Follower Robot - Debug Mode"));
+    Serial.println(F("-----------------------------"));
+    Serial.println(F("Wait 5 seconds before calibration..."));
+  }
   
-  // Stop motors initially
-  setMotorSpeeds(0, 0);
+  // Delay before starting (gives time to place robot on the line)
+  delay(5000);
   
-  // Delay to allow time to position the robot
-  delay(2000);
+  // Perform initial sensor calibration
+  calibrateSensors();
   
-  Serial.println("Line Follower Ready!");
+  // Stop motors at startup
+  setMotors(0, 0);
 }
 
 void loop() {
-  int sensorValues[NUM_SENSORS];
-  float position;
-  float pidValue;
+  // Read sensors and calculate position
+  readSensors();
   
-  // Read sensors and get line position
-  readSensors(sensorValues, &position);
+  // Run the main line following algorithm
+  followLine();
   
-  // Print sensor values for debugging
-  printSensorValues(sensorValues);
-  
-  // Check if line is detected
-  if (position >= 0) {
-    // Update last line detected time
-    lastLineTime = millis();
-    
-    // Calculate PID value
-    calculatePID(position, &pidValue);
-    
-    // Record direction for line recovery
-    if (position < IDEAL_POSITION - 0.5) {
-      // Line is to the left
-      lastDirection = -1;
-    } else if (position > IDEAL_POSITION + 0.5) {
-      // Line is to the right
-      lastDirection = 1;
-    }
-    
-    // Handle extreme positions differently to prevent oscillation
-    if (position < LINE_THRESHOLD_LOW) {
-      // Far left - make a sharper left turn
-      setMotorSpeeds(BASE_SPEED/2, BASE_SPEED*1.5);
-      Serial.println("Sharp Left Turn");
-    } else if (position > LINE_THRESHOLD_HIGH) {
-      // Far right - make a sharper right turn
-      setMotorSpeeds(BASE_SPEED*1.5, BASE_SPEED/2);
-      Serial.println("Sharp Right Turn");
-    } else {
-      // Normal PID control
-      int leftSpeed = BASE_SPEED + pidValue;
-      int rightSpeed = BASE_SPEED - pidValue;
-      
-      // Set motor speeds
-      setMotorSpeeds(leftSpeed, rightSpeed);
-      
-      // Debug output
-      Serial.print("Position: ");
-      Serial.print(position);
-      Serial.print(" PID: ");
-      Serial.print(pidValue);
-      Serial.print(" Motors L/R: ");
-      Serial.print(leftSpeed);
-      Serial.print("/");
-      Serial.println(rightSpeed);
-    }
-  } else {
-    // Line lost - try to recover
-    recoverLine();
+  // Print debug information if enabled
+  if (DEBUG_MODE) {
+    printDebugInfo();
   }
-  
-  // Short delay for stability
-  delay(10);
 }
 
 /**
- * Reads sensor values and calculates the line position.
- * Returns a weighted average of the line position between 0 and 7.
- * Returns -1 if no line is detected.
+ * Read sensor values and calculate robot position
  */
-void readSensors(int *sensorValues, float *position) {
+void readSensors() {
   float weightedSum = 0;
-  int sum = 0;
-  bool lineDetected = false;
+  float sum = 0;
   
   // Read all sensors
   for (int i = 0; i < NUM_SENSORS; i++) {
-    // Read analog value and invert the threshold comparison 
-    // (this works better with some sensor types)
-    int rawValue = analogRead(i);
-    sensorValues[i] = rawValue;
+    // Read analog value
+    sensorValues[i] = analogRead(i);
     
-    // Convert to binary (0 or 1)
-    if (rawValue > SENSOR_THRESHOLD) {
-      sensorValues[i] = 1;
-      lineDetected = true;
+    // Convert to digital (0 or 1)
+    if (sensorValues[i] > SENSOR_THRESHOLD) {
+      sensorDigital[i] = 1;  // Black line detected
     } else {
-      sensorValues[i] = 0;
+      sensorDigital[i] = 0;  // White surface
     }
     
-    // Calculate weighted sum
-    weightedSum += sensorValues[i] * i;
-    sum += sensorValues[i];
+    // Calculate weighted sum for position
+    weightedSum += sensorDigital[i] * (i + 1);  // Weight by sensor position (1-8)
+    sum += sensorDigital[i];                    // Total sensors that see the line
   }
   
-  // Calculate position
+  // Calculate position if at least one sensor detects the line
   if (sum > 0) {
-    *position = weightedSum / sum;
+    position = weightedSum / sum;
   } else {
-    *position = -1; // No line detected
+    // No line detected - use last known position
+    // Position remains unchanged
   }
 }
 
 /**
- * Calculates PID value based on current position and error.
+ * Main line following algorithm using PID control
  */
-void calculatePID(float currentPosition, float *pidValue) {
-  // Calculate error (how far from ideal position)
-  float error = IDEAL_POSITION - currentPosition;
-  
-  // Calculate PD components
-  float proportional = KP * error;
-  float derivative = KD * (error - lastError);
-  
-  // Calculate total PID value (we're only using P and D)
-  *pidValue = proportional + derivative;
-  
-  // Update last error for next iteration
-  lastError = error;
-}
-
-/**
- * Print sensor values for debugging
- */
-void printSensorValues(int *sensorValues) {
-  Serial.print("Sensors: ");
+void followLine() {
+  // Check if any sensor sees the line
+  bool lineDetected = false;
   for (int i = 0; i < NUM_SENSORS; i++) {
-    Serial.print(sensorValues[i]);
-    Serial.print(" ");
+    if (sensorDigital[i] == 1) {
+      lineDetected = true;
+      break;
+    }
   }
-  Serial.println();
+  
+  if (lineDetected) {
+    // Line is detected - calculate PID
+    
+    // Calculate error (how far from ideal position)
+    currentError = IDEAL_POSITION - position;
+    
+    // Calculate integral (sum of all errors)
+    integral += currentError;
+    
+    // Limit integral to prevent windup
+    if (integral > 100) integral = 100;
+    if (integral < -100) integral = -100;
+    
+    // Calculate PID value
+    float pidValue = (KP * currentError) + (KD * (currentError - previousError)) + (KI * integral);
+    
+    // Save current error for next iteration
+    previousError = currentError;
+    
+    // Calculate motor speeds based on PID value
+    leftMotorSpeed = BASE_SPEED + pidValue;
+    rightMotorSpeed = BASE_SPEED - pidValue;
+    
+    // Apply motor speeds
+    setMotors(leftMotorSpeed, rightMotorSpeed);
+    
+    // Remember the direction of line for recovery
+    if (currentError > 0) {
+      lastTurnDirection = 'L';  // Line is to the left
+    } else if (currentError < 0) {
+      lastTurnDirection = 'R';  // Line is to the right
+    }
+  } else {
+    // Line is lost - use recovery behavior
+    recoverLine();
+  }
 }
 
 /**
- * Try to recover the line when it's lost
+ * Attempt to recover the line when it's lost
  */
 void recoverLine() {
-  // Check how long we've been without a line
-  unsigned long currentTime = millis();
-  unsigned long timeSinceLastLine = currentTime - lastLineTime;
+  if (DEBUG_MODE) {
+    Serial.println(F("Line lost! Attempting recovery..."));
+  }
   
-  if (timeSinceLastLine > 2000) {
-    // If it's been more than 2 seconds, stop the robot
-    setMotorSpeeds(0, 0);
-    Serial.println("Line completely lost - stopping");
+  // First check if all sensors are on the line (junction or cross)
+  bool allOnLine = true;
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    if (sensorDigital[i] == 0) {
+      allOnLine = false;
+      break;
+    }
+  }
+  
+  if (allOnLine) {
+    // All sensors see black - could be a junction or cross
+    // Stop briefly and then continue forward
+    setMotors(0, 0);
+    delay(50);
+    setMotors(BASE_SPEED, BASE_SPEED);
     return;
   }
   
   // Turn in the last known direction of the line
-  Serial.print("Recovering line - turning ");
+  if (lastTurnDirection == 'L') {
+    // Turn left to find the line
+    setMotors(-TURN_SPEED, TURN_SPEED);
+  } else if (lastTurnDirection == 'R') {
+    // Turn right to find the line
+    setMotors(TURN_SPEED, -TURN_SPEED);
+  } else {
+    // No last direction known, rotate clockwise
+    setMotors(TURN_SPEED, -TURN_SPEED);
+  }
   
-  if (lastDirection <= 0) { // Left or unknown
-    Serial.println("left");
-    setMotorSpeeds(-TURN_SPEED/2, TURN_SPEED);
-  } else { // Right
-    Serial.println("right");
-    setMotorSpeeds(TURN_SPEED, -TURN_SPEED/2);
+  // Keep turning until a sensor detects the line
+  while (true) {
+    readSensors();
+    
+    // Check if any middle sensor sees the line
+    if (sensorDigital[3] == 1 || sensorDigital[4] == 1) {
+      // Line found, resume normal following
+      break;
+    }
+    
+    // Check if any sensor sees the line
+    for (int i = 0; i < NUM_SENSORS; i++) {
+      if (sensorDigital[i] == 1) {
+        // Line found, resume normal following
+        if (DEBUG_MODE) {
+          Serial.println(F("Line recovered!"));
+        }
+        return;
+      }
+    }
+    
+    // Avoid blocking for too long
+    delay(10);
   }
 }
 
 /**
- * Sets the speed of both motors.
+ * Calibrate sensors to determine appropriate threshold
  */
-void setMotorSpeeds(int leftSpeed, int rightSpeed) {
-  // Constrain speeds to valid range
+void calibrateSensors() {
+  if (DEBUG_MODE) {
+    Serial.println(F("Starting sensor calibration..."));
+  }
+  
+  int minValues[NUM_SENSORS];
+  int maxValues[NUM_SENSORS];
+  
+  // Initialize min values high and max values low
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    minValues[i] = 1023;
+    maxValues[i] = 0;
+  }
+  
+  // Calibrate for 2.5 seconds
+  for (int i = 0; i < 100; i++) {
+    // Read each sensor
+    for (int j = 0; j < NUM_SENSORS; j++) {
+      int value = analogRead(j);
+      
+      // Update min and max values
+      if (value < minValues[j]) {
+        minValues[j] = value;
+      }
+      if (value > maxValues[j]) {
+        maxValues[j] = value;
+      }
+    }
+    delay(25);
+  }
+  
+  // Calculate and set threshold (average of min and max)
+  int sum = 0;
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    int threshold = (minValues[i] + maxValues[i]) / 2;
+    sum += threshold;
+    
+    if (DEBUG_MODE) {
+      Serial.print(F("Sensor "));
+      Serial.print(i);
+      Serial.print(F(" min: "));
+      Serial.print(minValues[i]);
+      Serial.print(F(" max: "));
+      Serial.print(maxValues[i]);
+      Serial.print(F(" threshold: "));
+      Serial.println(threshold);
+    }
+  }
+  
+  // Set global threshold to average of all sensors
+  SENSOR_THRESHOLD = sum / NUM_SENSORS;
+  
+  if (DEBUG_MODE) {
+    Serial.print(F("Global threshold set to: "));
+    Serial.println(SENSOR_THRESHOLD);
+    Serial.println(F("Calibration complete!"));
+  }
+}
+
+/**
+ * Set motor speeds with safety checks
+ */
+void setMotors(int leftSpeed, int rightSpeed) {
+  // Constrain speeds to prevent overflow
   leftSpeed = constrain(leftSpeed, -MAX_SPEED, MAX_SPEED);
   rightSpeed = constrain(rightSpeed, -MAX_SPEED, MAX_SPEED);
   
-  // Set left motor speed and direction
+  // Set left motor
   if (leftSpeed >= 0) {
     analogWrite(LEFT_MOTOR_FORWARD, leftSpeed);
     analogWrite(LEFT_MOTOR_BACKWARD, 0);
@@ -240,7 +313,7 @@ void setMotorSpeeds(int leftSpeed, int rightSpeed) {
     analogWrite(LEFT_MOTOR_BACKWARD, -leftSpeed);
   }
   
-  // Set right motor speed and direction
+  // Set right motor
   if (rightSpeed >= 0) {
     analogWrite(RIGHT_MOTOR_FORWARD, rightSpeed);
     analogWrite(RIGHT_MOTOR_BACKWARD, 0);
@@ -248,5 +321,42 @@ void setMotorSpeeds(int leftSpeed, int rightSpeed) {
     analogWrite(RIGHT_MOTOR_FORWARD, 0);
     analogWrite(RIGHT_MOTOR_BACKWARD, -rightSpeed);
   }
+}
+
+/**
+ * Print debug information to Serial
+ */
+void printDebugInfo() {
+  // Limit how often we print debug information
+  unsigned long currentTime = millis();
+  if (currentTime - lastDebugTime < DEBUG_INTERVAL) {
+    return;
+  }
+  lastDebugTime = currentTime;
+  
+  // Print sensor values
+  Serial.print(F("Sensors: "));
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    Serial.print(sensorValues[i]);
+    Serial.print("(");
+    Serial.print(sensorDigital[i]);
+    Serial.print(") ");
+  }
+  Serial.println();
+  
+  // Print position and error
+  Serial.print(F("Position: "));
+  Serial.print(position);
+  Serial.print(F(" Error: "));
+  Serial.println(currentError);
+  
+  // Print motor speeds
+  Serial.print(F("Motors L/R: "));
+  Serial.print(leftMotorSpeed);
+  Serial.print("/");
+  Serial.println(rightMotorSpeed);
+  
+  // Add separator for readability
+  Serial.println(F("-----------------------------"));
 }
 
