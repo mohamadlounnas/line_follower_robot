@@ -1,22 +1,22 @@
 /**
- * Advanced Line Follower Robot
+ * Simple Line Follower Robot
  * 
  * This implementation includes:
- * - Sensor calibration for reliable readings
+ * - Fixed threshold for line detection (800)
  * - PID control for smooth line following
  * - Memory of last detected line position for recovery
- * - Robust line loss handling
+ * - Forward-only motor movement
  * 
  * Hardware Configuration:
  * - 8 IR sensors on analog pins A0-A7
- * - Motor pins: lmf(9), lmb(6), rmf(10), rmb(11)
+ * - Motor pins: lmf(10), lmb(11), rmf(9), rmb(6)
  */
 
 // Motor pins
-#define rmf 10 // Right motor forward 
-#define rmb 11 // Right motor backward
-#define lmf 9  // Left motor forward
-#define lmb 6  // Left motor backward
+#define rmf 9  // Right motor forward 
+#define rmb 6  // Right motor backward
+#define lmf 10 // Left motor forward
+#define lmb 11 // Left motor backward
 
 // PID control constants
 #define Kp 0.2       // Proportional constant
@@ -25,26 +25,17 @@
 #define MaxSpeed 120 // Maximum motor speed
 #define TurnSpeed 100 // Speed for turning
 
-// Sensor array configuration
+// Sensor configuration
 #define NUM_SENSORS 8
 #define LINE_POSITION_CENTER 3500 // Center position (3.5 * 1000)
-
-// Thresholds for line detection
-#define WHITE_THRESHOLD 100  // Low reading for white surface
-#define BLACK_THRESHOLD 900  // High reading for black line
-#define MIN_SENSORS_ON_LINE 1 // Minimum sensors required to consider on-line
-
-// Calibration samples
-#define CALIBRATION_SAMPLES 100
+#define THRESHOLD 800           // Fixed threshold for line detection
+#define MIN_SENSORS_ON_LINE 1   // Minimum sensors required to consider on-line
 
 // Global variables
 int sensorValues[NUM_SENSORS];     // Raw sensor readings
-int sensorMin[NUM_SENSORS];        // Calibration - minimum values
-int sensorMax[NUM_SENSORS];        // Calibration - maximum values
 int lastPosition = LINE_POSITION_CENTER; // Last known line position
 int lastError = 0;                 // Previous error for derivative term
 char lastDirection = 'c';          // Last turning direction (l=left, r=right, c=center)
-bool isCalibrated = false;         // Calibration flag
 
 /**
  * Setup function - runs once at startup
@@ -59,8 +50,9 @@ void setup() {
   // Initialize serial for debugging
   Serial.begin(9600);
   
-  // Run calibration routine
-  calibrateSensors();
+  // Briefly pause before starting
+  delay(1000);
+  Serial.println("Line follower initialized with threshold: 800");
 }
 
 /**
@@ -71,96 +63,27 @@ void loop() {
 }
 
 /**
- * Calibrate sensors to adjust for ambient light conditions
- * Rotates robot during calibration to capture full sensor range
- */
-void calibrateSensors() {
-  Serial.println("Starting calibration...");
-  
-  // Initialize calibration values
-  for (int i = 0; i < NUM_SENSORS; i++) {
-    sensorMin[i] = 1023;
-    sensorMax[i] = 0;
-  }
-  
-  // Rotate left and right to calibrate sensors
-  for (int i = 0; i < CALIBRATION_SAMPLES; i++) {
-    // Zigzag motion during calibration
-    if (i < CALIBRATION_SAMPLES/2) {
-      motor(TurnSpeed, -TurnSpeed); // Turn left
-    } else {
-      motor(-TurnSpeed, TurnSpeed); // Turn right
-    }
-    
-    // Read sensors and update min/max values
-    readSensors(false);
-    for (int j = 0; j < NUM_SENSORS; j++) {
-      if (sensorValues[j] < sensorMin[j]) {
-        sensorMin[j] = sensorValues[j];
-      }
-      if (sensorValues[j] > sensorMax[j]) {
-        sensorMax[j] = sensorValues[j];
-      }
-    }
-    
-    delay(10);
-  }
-  
-  // Stop motors
-  motor(0, 0);
-  
-  // Debug output of calibration values
-  Serial.println("Calibration complete!");
-  Serial.println("Min values:");
-  for (int i = 0; i < NUM_SENSORS; i++) {
-    Serial.print(sensorMin[i]);
-    Serial.print(" ");
-  }
-  Serial.println();
-  
-  Serial.println("Max values:");
-  for (int i = 0; i < NUM_SENSORS; i++) {
-    Serial.print(sensorMax[i]);
-    Serial.print(" ");
-  }
-  Serial.println();
-  
-  isCalibrated = true;
-  
-  // Wait for a moment after calibration
-  delay(1000);
-}
-
-/**
- * Read all sensor values
- * @param normalize If true, normalize readings based on calibration data
+ * Read all sensor values using the fixed threshold
  * @return true if at least one sensor detects the line
  */
-bool readSensors(bool normalize) {
+bool readSensors() {
   int sensorsOnLine = 0;
   
   for (int i = 0; i < NUM_SENSORS; i++) {
     // Read raw analog values, A0 is sensor[0], A7 is sensor[7]
     sensorValues[i] = analogRead(NUM_SENSORS - 1 - i);
     
-    // Normalize based on calibration if needed
-    if (normalize && isCalibrated) {
-      // Constrain readings to calibration range
-      sensorValues[i] = constrain(sensorValues[i], sensorMin[i], sensorMax[i]);
-      // Map to 0-1000 range
-      sensorValues[i] = map(sensorValues[i], sensorMin[i], sensorMax[i], 0, 1000);
-      
-      // Count sensors that detect the line
-      if (sensorValues[i] > 500) {
-        sensorsOnLine++;
-      }
-    }
-    
     // Print sensor values for debugging
     Serial.print(sensorValues[i]);
     Serial.print("\t");
+    
+    // Count sensors that detect the line (above threshold)
+    if (sensorValues[i] > THRESHOLD) {
+      sensorsOnLine++;
+    }
   }
   
+  Serial.println();
   return (sensorsOnLine >= MIN_SENSORS_ON_LINE);
 }
 
@@ -175,15 +98,15 @@ int getLinePosition() {
   for (int i = 0; i < NUM_SENSORS; i++) {
     int value = sensorValues[i];
     
-    // Only consider readings that likely indicate line presence
-    if (value > 200) {
+    // Only consider readings above the threshold
+    if (value > THRESHOLD) {
       weightedSum += value * (i * 1000);
       sum += value;
     }
   }
   
   // Check if line is detected
-  if (sum > 50) {
+  if (sum > 0) {
     lastPosition = weightedSum / sum;
     
     // Update direction memory based on line position
@@ -208,8 +131,8 @@ int getLinePosition() {
  * Main line following function using PID control
  */
 void followLine() {
-  // Read sensor values (normalized)
-  bool onLine = readSensors(true);
+  // Read sensor values and determine line position
+  bool onLine = readSensors();
   int position = getLinePosition();
   
   // Calculate error from center position
@@ -237,9 +160,9 @@ void followLine() {
     leftMotorSpeed = BaseSpeed + pidOutput;
     rightMotorSpeed = BaseSpeed - pidOutput;
     
-    // Constrain speeds to valid range
-    leftMotorSpeed = constrain(leftMotorSpeed, -MaxSpeed, MaxSpeed);
-    rightMotorSpeed = constrain(rightMotorSpeed, -MaxSpeed, MaxSpeed);
+    // Constrain speeds to valid range (forward motion only)
+    leftMotorSpeed = constrain(leftMotorSpeed, 0, MaxSpeed);
+    rightMotorSpeed = constrain(rightMotorSpeed, 0, MaxSpeed);
     
     motor(leftMotorSpeed, rightMotorSpeed);
   } else {
@@ -250,80 +173,69 @@ void followLine() {
 
 /**
  * Recovery behavior when line is lost
+ * Only uses forward motion for recovery
  */
 void recoverLine() {
-  // Stop briefly to stabilize
-  motor(0, 0);
-  delay(10);
-  
-  // Turn in the direction of the last known line position
+  // Turn in the direction of the last known line position (forward-only turning)
   if (lastDirection == 'l') {
-    // Line was on the left
+    // Line was on the left - turn left by slowing right motor
     Serial.println("Recovering - turning left");
-    motor(-TurnSpeed, TurnSpeed);
+    motor(0, TurnSpeed);
   } else if (lastDirection == 'r') {
-    // Line was on the right
+    // Line was on the right - turn right by slowing left motor
     Serial.println("Recovering - turning right");
-    motor(TurnSpeed, -TurnSpeed);
+    motor(TurnSpeed, 0);
   } else {
-    // Unknown direction, search in a spiral pattern
-    Serial.println("Recovering - searching pattern");
+    // Unknown direction, use right-biased search
+    Serial.println("Recovering - searching");
     
-    // Alternate turning directions in a widening pattern
+    // Alternate search directions with varying intensities
     static int searchStage = 0;
-    static int searchTime = 100;
     
-    if (searchStage % 2 == 0) {
-      motor(TurnSpeed, -TurnSpeed);
+    if (searchStage % 4 == 0) {
+      motor(TurnSpeed, TurnSpeed/4);  // Gentle right turn
+    } else if (searchStage % 4 == 1) {
+      motor(TurnSpeed/4, TurnSpeed);  // Gentle left turn
+    } else if (searchStage % 4 == 2) {
+      motor(TurnSpeed, 0);           // Sharp right turn
     } else {
-      motor(-TurnSpeed, TurnSpeed);
+      motor(0, TurnSpeed);           // Sharp left turn
     }
     
-    delay(searchTime);
+    delay(100);
     searchStage++;
     
-    // Increase search radius over time
-    if (searchStage % 2 == 0) {
-      searchTime += 50;
-    }
-    
-    // Reset if search gets too wide
-    if (searchTime > 500) {
-      searchTime = 100;
+    // Reset search stage after a while to prevent getting stuck
+    if (searchStage > 20) {
+      searchStage = 0;
     }
   }
   
   // Check if we found the line again
-  readSensors(true);
+  readSensors();
   getLinePosition();
 }
 
 /**
- * Control both motors
- * @param leftSpeed Left motor speed (-MaxSpeed to MaxSpeed)
- * @param rightSpeed Right motor speed (-MaxSpeed to MaxSpeed)
+ * Control both motors (forward motion only)
+ * @param leftSpeed Left motor speed (0 to MaxSpeed)
+ * @param rightSpeed Right motor speed (0 to MaxSpeed)
  */
 void motor(int leftSpeed, int rightSpeed) {
-  // Control left motor
-  if (leftSpeed >= 0) {
-    // Forward motion
-    analogWrite(lmf, leftSpeed);
-    analogWrite(lmb, 0);
-  } else {
-    // Backward motion
-    analogWrite(lmf, 0);
-    analogWrite(lmb, -leftSpeed);
-  }
+  // Ensure speeds are non-negative (forward motion only)
+  leftSpeed = max(0, leftSpeed);
+  rightSpeed = max(0, rightSpeed);
   
-  // Control right motor
-  if (rightSpeed >= 0) {
-    // Forward motion
-    analogWrite(rmf, rightSpeed);
-    analogWrite(rmb, 0);
-  } else {
-    // Backward motion
-    analogWrite(rmf, 0);
-    analogWrite(rmb, -rightSpeed);
-  }
+  // Apply motor speeds
+  analogWrite(lmf, leftSpeed);
+  analogWrite(lmb, 0);  // Always 0 for forward-only motion
+  
+  analogWrite(rmf, rightSpeed);
+  analogWrite(rmb, 0);  // Always 0 for forward-only motion
+  
+  Serial.print("Motors: L=");
+  Serial.print(leftSpeed);
+  Serial.print(" R=");
+  Serial.println(rightSpeed);
 }
 
