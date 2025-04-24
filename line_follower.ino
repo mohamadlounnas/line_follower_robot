@@ -2,7 +2,7 @@
  * Simple Line Follower Robot
  * 
  * This code provides a robust implementation of a line follower robot
- * with extensive debugging capabilities and a simplified PID controller.
+ * using a bang-bang control strategy with max speed pulses.
  * 
  * Hardware Configuration:
  * - 8 IR sensors (A0-A7)
@@ -19,35 +19,33 @@
 // Debug mode
 #define DEBUG_MODE true  // Set to true for serial debugging information
 
-// PID Controller Parameters - REDUCED TO MINIMIZE OVERSHOOT
-float KP = 8;        // Proportional constant - REDUCED from 20
-float KD = 15;       // Derivative constant - REDUCED from 25
-float KI = 0;        // Integral constant - typically not needed for line following
-
-// Motor parameters - REDUCED SPEEDS TO MINIMIZE OVERSHOOT
-int BASE_SPEED = 60;      // Base speed for both motors - REDUCED from 80
-int MAX_SPEED = 100;      // Maximum allowed motor speed - REDUCED from 120
-int TURN_SPEED = 80;      // Speed when making turns - REDUCED from 100
+// Motor parameters
+#define MAX_SPEED 120     // Maximum speed for motors
+#define STOP_SPEED 0      // Speed when stopped
 
 // Sensor parameters
 int SENSOR_THRESHOLD = 700;  // Threshold to distinguish black from white (adjust based on your sensors)
 #define NUM_SENSORS 8        // Number of sensors being used
 #define IDEAL_POSITION 3.5   // Ideal position (center point for 8 sensors)
+#define MARGIN 0.5          // How far from ideal position before correction
 
-// Error smoothing - ADD SMOOTHING TO PREVENT JITTERY MOVEMENT
-#define ERROR_SMOOTHING true  // Enable error smoothing
-#define SMOOTHING_FACTOR 0.7  // Higher value = more smoothing (0.0-1.0)
+// Line tracking states
+#define ON_LINE 0           // Robot is on the line
+#define LINE_LEFT 1         // Line is to the left
+#define LINE_RIGHT 2        // Line is to the right
+#define LINE_LOST 3         // Line is lost
 
 // Global variables
-float currentError = 0;
-float previousError = 0;
-float smoothedError = 0;     // Smoothed error value
-float integral = 0;
+int lineState = ON_LINE;    // Current line state
 int leftMotorSpeed, rightMotorSpeed;
 int sensorValues[NUM_SENSORS];   // Raw analog values
 int sensorDigital[NUM_SENSORS];  // Converted to 0 or 1
 float position = 0;              // Weighted average of sensor positions
 char lastTurnDirection = 'N';    // 'L' for left, 'R' for right, 'N' for not set
+
+// Pulse timing
+unsigned long lastDirectionChange = 0;
+#define MIN_PULSE_DURATION 30  // Minimum duration for a correction pulse (ms)
 
 // Debug variables
 unsigned long lastDebugTime = 0;
@@ -66,7 +64,7 @@ void setup() {
     Serial.println(F("Line Follower Robot - Debug Mode"));
     Serial.println(F("-----------------------------"));
     Serial.println(F("Wait 5 seconds before calibration..."));
-    Serial.println(F("ANTI-OVERSHOOT SETTINGS ENABLED"));
+    Serial.println(F("BANG-BANG CONTROL WITH MAX SPEED PULSES"));
   }
   
   // Delay before starting (gives time to place robot on the line)
@@ -76,7 +74,7 @@ void setup() {
   calibrateSensors();
   
   // Stop motors at startup
-  setMotors(0, 0);
+  setMotors(STOP_SPEED, STOP_SPEED);
 }
 
 void loop() {
@@ -84,7 +82,7 @@ void loop() {
   readSensors();
   
   // Run the main line following algorithm
-  followLine();
+  followLineBangBang();
   
   // Print debug information if enabled
   if (DEBUG_MODE) {
@@ -126,9 +124,9 @@ void readSensors() {
 }
 
 /**
- * Main line following algorithm using PID control
+ * Main line following algorithm using bang-bang control with pulses
  */
-void followLine() {
+void followLineBangBang() {
   // Check if any sensor sees the line
   bool lineDetected = false;
   for (int i = 0; i < NUM_SENSORS; i++) {
@@ -139,55 +137,64 @@ void followLine() {
   }
   
   if (lineDetected) {
-    // Line is detected - calculate PID
-    
-    // Calculate error (how far from ideal position)
-    currentError = IDEAL_POSITION - position;
-    
-    // Apply error smoothing to reduce jitter if enabled
-    if (ERROR_SMOOTHING) {
-      // Exponential moving average filter
-      smoothedError = (SMOOTHING_FACTOR * smoothedError) + ((1 - SMOOTHING_FACTOR) * currentError);
-    } else {
-      smoothedError = currentError;
+    // Determine line position state
+    if (position < (IDEAL_POSITION - MARGIN)) {
+      // Line is to the left
+      lineState = LINE_LEFT;
+      lastTurnDirection = 'L';
+    } 
+    else if (position > (IDEAL_POSITION + MARGIN)) {
+      // Line is to the right
+      lineState = LINE_RIGHT;
+      lastTurnDirection = 'R';
+    } 
+    else {
+      // Line is centered
+      lineState = ON_LINE;
     }
     
-    // Calculate integral (sum of all errors)
-    integral += smoothedError;
-    
-    // Limit integral to prevent windup
-    if (integral > 100) integral = 100;
-    if (integral < -100) integral = -100;
-    
-    // Calculate PID value
-    float pidValue = (KP * smoothedError) + (KD * (smoothedError - previousError)) + (KI * integral);
-    
-    // Save current error for next iteration
-    previousError = smoothedError;
-    
-    // Calculate motor speeds based on PID value
-    leftMotorSpeed = BASE_SPEED + pidValue;
-    rightMotorSpeed = BASE_SPEED - pidValue;
-    
-    // Apply motor speeds - with deadband to prevent small corrections
-    // Only apply changes if PID value is significant
-    if (abs(pidValue) < 5) {
-      // Small correction - maintain more stable speed
-      setMotors(BASE_SPEED, BASE_SPEED);
-    } else {
-      // Larger correction needed
-      setMotors(leftMotorSpeed, rightMotorSpeed);
-    }
-    
-    // Remember the direction of line for recovery
-    if (currentError > 0) {
-      lastTurnDirection = 'L';  // Line is to the left
-    } else if (currentError < 0) {
-      lastTurnDirection = 'R';  // Line is to the right
-    }
-  } else {
-    // Line is lost - use recovery behavior
+    // Apply bang-bang control with pulses
+    applyBangBangControl();
+  } 
+  else {
+    // Line is lost
+    lineState = LINE_LOST;
     recoverLine();
+  }
+}
+
+/**
+ * Apply bang-bang control strategy based on line state
+ */
+void applyBangBangControl() {
+  unsigned long currentTime = millis();
+  
+  switch (lineState) {
+    case ON_LINE:
+      // Line is centered - go straight at max speed
+      setMotors(MAX_SPEED, MAX_SPEED);
+      break;
+      
+    case LINE_LEFT:
+      // Line is to the left - turn left
+      // Stop left motor, run right motor at max speed
+      setMotors(STOP_SPEED, MAX_SPEED);
+      lastDirectionChange = currentTime;
+      break;
+      
+    case LINE_RIGHT:
+      // Line is to the right - turn right
+      // Run left motor at max speed, stop right motor
+      setMotors(MAX_SPEED, STOP_SPEED);
+      lastDirectionChange = currentTime;
+      break;
+  }
+  
+  // Ensure minimum pulse duration for corrections
+  if ((lineState == LINE_LEFT || lineState == LINE_RIGHT) && 
+      (currentTime - lastDirectionChange < MIN_PULSE_DURATION)) {
+    // Continue the correction for at least MIN_PULSE_DURATION milliseconds
+    delay(MIN_PULSE_DURATION - (currentTime - lastDirectionChange));
   }
 }
 
@@ -211,22 +218,22 @@ void recoverLine() {
   if (allOnLine) {
     // All sensors see black - could be a junction or cross
     // Stop briefly and then continue forward
-    setMotors(0, 0);
+    setMotors(STOP_SPEED, STOP_SPEED);
     delay(50);
-    setMotors(BASE_SPEED, BASE_SPEED);
+    setMotors(MAX_SPEED, MAX_SPEED);
     return;
   }
   
   // Turn in the last known direction of the line
   if (lastTurnDirection == 'L') {
-    // Turn left to find the line - GENTLER TURN
-    setMotors(-TURN_SPEED/2, TURN_SPEED/2);
+    // Turn left to find the line
+    setMotors(-MAX_SPEED, MAX_SPEED);
   } else if (lastTurnDirection == 'R') {
-    // Turn right to find the line - GENTLER TURN
-    setMotors(TURN_SPEED/2, -TURN_SPEED/2);
+    // Turn right to find the line
+    setMotors(MAX_SPEED, -MAX_SPEED);
   } else {
-    // No last direction known, rotate clockwise - GENTLER TURN
-    setMotors(TURN_SPEED/2, -TURN_SPEED/2);
+    // No last direction known, rotate clockwise
+    setMotors(MAX_SPEED, -MAX_SPEED);
   }
   
   // Keep turning until a sensor detects the line
@@ -325,6 +332,10 @@ void setMotors(int leftSpeed, int rightSpeed) {
   leftSpeed = constrain(leftSpeed, -MAX_SPEED, MAX_SPEED);
   rightSpeed = constrain(rightSpeed, -MAX_SPEED, MAX_SPEED);
   
+  // Save current motor speeds for debugging
+  leftMotorSpeed = leftSpeed;
+  rightMotorSpeed = rightSpeed;
+  
   // Set left motor
   if (leftSpeed >= 0) {
     analogWrite(LEFT_MOTOR_FORWARD, leftSpeed);
@@ -365,13 +376,24 @@ void printDebugInfo() {
   }
   Serial.println();
   
-  // Print position and error values
+  // Print position and line state
   Serial.print(F("Position: "));
   Serial.print(position);
-  Serial.print(F(" Raw Error: "));
-  Serial.print(currentError);
-  Serial.print(F(" Smoothed Error: "));
-  Serial.println(smoothedError);
+  Serial.print(F(" Line State: "));
+  switch (lineState) {
+    case ON_LINE:
+      Serial.println(F("ON_LINE"));
+      break;
+    case LINE_LEFT:
+      Serial.println(F("LINE_LEFT"));
+      break;
+    case LINE_RIGHT:
+      Serial.println(F("LINE_RIGHT"));
+      break;
+    case LINE_LOST:
+      Serial.println(F("LINE_LOST"));
+      break;
+  }
   
   // Print motor speeds
   Serial.print(F("Motors L/R: "));
