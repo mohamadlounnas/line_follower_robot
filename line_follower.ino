@@ -19,24 +19,29 @@
 // Debug mode
 #define DEBUG_MODE true  // Set to true for serial debugging information
 
-// PID Controller Parameters
-float KP = 20;       // Proportional constant - start with a lower value
-float KD = 25;       // Derivative constant - adjust for smoothness
+// PID Controller Parameters - REDUCED TO MINIMIZE OVERSHOOT
+float KP = 8;        // Proportional constant - REDUCED from 20
+float KD = 15;       // Derivative constant - REDUCED from 25
 float KI = 0;        // Integral constant - typically not needed for line following
 
-// Motor parameters
-int BASE_SPEED = 80;      // Base speed for both motors 
-int MAX_SPEED = 120;      // Maximum allowed motor speed
-int TURN_SPEED = 100;     // Speed when making turns
+// Motor parameters - REDUCED SPEEDS TO MINIMIZE OVERSHOOT
+int BASE_SPEED = 60;      // Base speed for both motors - REDUCED from 80
+int MAX_SPEED = 100;      // Maximum allowed motor speed - REDUCED from 120
+int TURN_SPEED = 80;      // Speed when making turns - REDUCED from 100
 
 // Sensor parameters
 int SENSOR_THRESHOLD = 700;  // Threshold to distinguish black from white (adjust based on your sensors)
 #define NUM_SENSORS 8        // Number of sensors being used
 #define IDEAL_POSITION 3.5   // Ideal position (center point for 8 sensors)
 
+// Error smoothing - ADD SMOOTHING TO PREVENT JITTERY MOVEMENT
+#define ERROR_SMOOTHING true  // Enable error smoothing
+#define SMOOTHING_FACTOR 0.7  // Higher value = more smoothing (0.0-1.0)
+
 // Global variables
 float currentError = 0;
 float previousError = 0;
+float smoothedError = 0;     // Smoothed error value
 float integral = 0;
 int leftMotorSpeed, rightMotorSpeed;
 int sensorValues[NUM_SENSORS];   // Raw analog values
@@ -61,6 +66,7 @@ void setup() {
     Serial.println(F("Line Follower Robot - Debug Mode"));
     Serial.println(F("-----------------------------"));
     Serial.println(F("Wait 5 seconds before calibration..."));
+    Serial.println(F("ANTI-OVERSHOOT SETTINGS ENABLED"));
   }
   
   // Delay before starting (gives time to place robot on the line)
@@ -138,25 +144,40 @@ void followLine() {
     // Calculate error (how far from ideal position)
     currentError = IDEAL_POSITION - position;
     
+    // Apply error smoothing to reduce jitter if enabled
+    if (ERROR_SMOOTHING) {
+      // Exponential moving average filter
+      smoothedError = (SMOOTHING_FACTOR * smoothedError) + ((1 - SMOOTHING_FACTOR) * currentError);
+    } else {
+      smoothedError = currentError;
+    }
+    
     // Calculate integral (sum of all errors)
-    integral += currentError;
+    integral += smoothedError;
     
     // Limit integral to prevent windup
     if (integral > 100) integral = 100;
     if (integral < -100) integral = -100;
     
     // Calculate PID value
-    float pidValue = (KP * currentError) + (KD * (currentError - previousError)) + (KI * integral);
+    float pidValue = (KP * smoothedError) + (KD * (smoothedError - previousError)) + (KI * integral);
     
     // Save current error for next iteration
-    previousError = currentError;
+    previousError = smoothedError;
     
     // Calculate motor speeds based on PID value
     leftMotorSpeed = BASE_SPEED + pidValue;
     rightMotorSpeed = BASE_SPEED - pidValue;
     
-    // Apply motor speeds
-    setMotors(leftMotorSpeed, rightMotorSpeed);
+    // Apply motor speeds - with deadband to prevent small corrections
+    // Only apply changes if PID value is significant
+    if (abs(pidValue) < 5) {
+      // Small correction - maintain more stable speed
+      setMotors(BASE_SPEED, BASE_SPEED);
+    } else {
+      // Larger correction needed
+      setMotors(leftMotorSpeed, rightMotorSpeed);
+    }
     
     // Remember the direction of line for recovery
     if (currentError > 0) {
@@ -198,14 +219,14 @@ void recoverLine() {
   
   // Turn in the last known direction of the line
   if (lastTurnDirection == 'L') {
-    // Turn left to find the line
-    setMotors(-TURN_SPEED, TURN_SPEED);
+    // Turn left to find the line - GENTLER TURN
+    setMotors(-TURN_SPEED/2, TURN_SPEED/2);
   } else if (lastTurnDirection == 'R') {
-    // Turn right to find the line
-    setMotors(TURN_SPEED, -TURN_SPEED);
+    // Turn right to find the line - GENTLER TURN
+    setMotors(TURN_SPEED/2, -TURN_SPEED/2);
   } else {
-    // No last direction known, rotate clockwise
-    setMotors(TURN_SPEED, -TURN_SPEED);
+    // No last direction known, rotate clockwise - GENTLER TURN
+    setMotors(TURN_SPEED/2, -TURN_SPEED/2);
   }
   
   // Keep turning until a sensor detects the line
@@ -344,11 +365,13 @@ void printDebugInfo() {
   }
   Serial.println();
   
-  // Print position and error
+  // Print position and error values
   Serial.print(F("Position: "));
   Serial.print(position);
-  Serial.print(F(" Error: "));
-  Serial.println(currentError);
+  Serial.print(F(" Raw Error: "));
+  Serial.print(currentError);
+  Serial.print(F(" Smoothed Error: "));
+  Serial.println(smoothedError);
   
   // Print motor speeds
   Serial.print(F("Motors L/R: "));
