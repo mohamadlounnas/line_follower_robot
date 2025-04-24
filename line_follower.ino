@@ -15,23 +15,40 @@
   int thresholds = 760; //threshold = (minimum analog value + Maximum Analog Value) / 2
   
   float c; // Position value (weighted average of sensor readings)
-  int left_motor_speed = 90, right_motor_speed = 90; // Increased base speed for faster response
+  
+  // Base speed configuration - will be adjusted dynamically
+  int base_speed = 110;            // Base speed for straight lines
+  int min_speed = 70;              // Minimum speed during sharp turns
+  int max_speed = 150;             // Maximum speed on straight sections
+  int left_motor_speed, right_motor_speed;  // Current motor speeds
   int left_motor, right_motor;
-  int kp = 35, kd = 45; // Increased PID constants for more aggressive corrections
+  
+  // PID constants - reduced to minimize vibration
+  int kp = 25;    // Proportional constant (reduced from 35)
+  int kd = 20;    // Derivative constant (reduced from 45)
   int PID_value;
   float current_error, previous_error;
-  int turn_speed = 140; // Increased turn speed for faster response
+  
+  // Turn settings
+  int turn_speed = 100;   // Reduced turn speed to avoid missing the line
+  int final_approach_speed = 60;  // Slower speed when approaching line during turn
   char last_direction = 'n'; // 'n' for none, 'l' for left, 'r' for right
-  int maxs = 150; // Increased maximum motor speed
+  int maxs = 180; // Maximum possible motor speed
   
   // Variables to track last line position
   float last_position = 4.5; // Default center position
   unsigned long last_line_detected = 0; // Time when line was last detected
-  unsigned long line_lost_timeout = 50; // Reduced timeout for faster response
+  unsigned long line_lost_timeout = 50; // Time in ms before considering line lost
   
   // Flags to track turning state
   bool is_turning = false;
-  bool turn_complete = false;
+  bool approach_phase = false;
+  
+  // Speed control variables
+  float speed_factor = 1.0;       // Dynamic speed adjustment factor
+  float error_threshold = 0.8;    // Error threshold for speed adjustment
+  unsigned long last_speed_change = 0;  // Time tracking for smooth acceleration
+  int accel_delay = 15;           // Delay between speed changes (ms)
 
  
   void setup() {
@@ -111,6 +128,48 @@
   bool center_line_detected() {
     return (sensor[3] == 1 || sensor[4] == 1);
   }
+  
+  /**
+   * Updates speed dynamically based on error and conditions
+   * Makes the robot slow down for turns and speed up on straight sections
+   */
+  void update_dynamic_speed() {
+    // Calculate how far we are from center (0 = centered, 1 = far off)
+    float error_magnitude = abs(current_error) / 4.5;
+    
+    // Determine the target speed factor (1.0 = full speed, 0.5 = half speed)
+    float target_factor;
+    
+    if (error_magnitude < error_threshold) {
+      // On straight sections, gradually increase speed
+      target_factor = 1.0 - (error_magnitude / error_threshold) * 0.3;
+    } else {
+      // For turns, reduce speed based on how sharp the turn is
+      target_factor = 0.7 - (error_magnitude - error_threshold) * 0.4;
+      if (target_factor < 0.3) target_factor = 0.3;
+    }
+    
+    // Smooth acceleration/deceleration (avoid abrupt speed changes)
+    if (millis() - last_speed_change > accel_delay) {
+      // Only update speed periodically to avoid jerking
+      if (target_factor > speed_factor) {
+        speed_factor += 0.05; // Accelerate gradually
+        if (speed_factor > target_factor) speed_factor = target_factor;
+      } else {
+        speed_factor -= 0.08; // Decelerate more quickly
+        if (speed_factor < target_factor) speed_factor = target_factor;
+      }
+      last_speed_change = millis();
+    }
+    
+    // Apply the speed factor to the base speed
+    left_motor_speed = base_speed * speed_factor;
+    right_motor_speed = base_speed * speed_factor;
+    
+    // Ensure minimum speed is maintained
+    if (left_motor_speed < min_speed) left_motor_speed = min_speed;
+    if (right_motor_speed < min_speed) right_motor_speed = min_speed;
+  }
 
   /**
    * Main line following function with PID control and decision making
@@ -132,17 +191,30 @@
       // ---- CASE 1: Line is detected - use PID control for line following ----
       if (line_detected && !is_turning) {
         current_error = 4.5 - c;
-        Serial.print(current_error);
-        Serial.print("  ");
+        
+        // Update speeds dynamically based on error
+        update_dynamic_speed();
+        
+        // Calculate PID value
         PID_value = current_error * kp + kd * (current_error - previous_error);
         previous_error = current_error;
-        Serial.println(PID_value);
         
+        // Apply PID to motor speeds
         right_motor = right_motor_speed - PID_value;
         left_motor = left_motor_speed + PID_value;
+        
+        // Apply motor speeds
         motor(left_motor, right_motor);
         
-        // Update last direction more aggressively based on position
+        // Debug output
+        Serial.print("Error: ");
+        Serial.print(current_error);
+        Serial.print(" Speed: ");
+        Serial.print(left_motor_speed);
+        Serial.print("/");
+        Serial.println(right_motor_speed);
+        
+        // Update last direction based on the current position
         if (c < 3.5) {
           last_direction = 'l'; // Line is on the left
         } else if (c > 5.5) {
@@ -150,16 +222,18 @@
         }
         
         // Check for sharp left/right turns
-        if (sensor[0] == 1 && !right_line_detected()) {
+        if (sensor[0] == 1 && !right_line_detected() && !center_line_detected()) {
           // Sharp left turn detected
           last_direction = 'l';
           is_turning = true;
+          approach_phase = false;
           left();
         }
-        else if (sensor[7] == 1 && !left_line_detected()) {
+        else if (sensor[7] == 1 && !left_line_detected() && !center_line_detected()) {
           // Sharp right turn detected
           last_direction = 'r';
           is_turning = true;
+          approach_phase = false;
           right();
         }
       }
@@ -171,9 +245,9 @@
         if (millis() - last_line_detected < line_lost_timeout) {
           // Continue in the same direction as before
           if (last_position < 3.5) {
-            motor(turn_speed/3, turn_speed);  // More aggressive left turn
+            motor(turn_speed/2, turn_speed);  // Moderate left turn
           } else if (last_position > 5.5) {
-            motor(turn_speed, turn_speed/3);  // More aggressive right turn
+            motor(turn_speed, turn_speed/2);  // Moderate right turn
           } else {
             motor(turn_speed, turn_speed);  // Go straight
           }
@@ -181,7 +255,7 @@
         // Line has been lost for a while, start turning recovery
         else {
           is_turning = true;
-          turn_complete = false;
+          approach_phase = false;
           
           if (last_direction == 'r') {
             right();
@@ -198,16 +272,18 @@
       // ---- CASE 3: Handle special corner/junction cases ----
       
       // Left corner - multiple left sensors detecting
-      if (sensor[0] == 1 && sensor[1] == 1 && sensor[2] == 1 && !right_line_detected()) {
+      if (!is_turning && sensor[0] == 1 && sensor[1] == 1 && !center_line_detected() && !right_line_detected()) {
         last_direction = 'l';
         is_turning = true;
+        approach_phase = false;
         left();
       }
       
       // Right corner - multiple right sensors detecting
-      if (sensor[5] == 1 && sensor[6] == 1 && sensor[7] == 1 && !left_line_detected()) {
+      if (!is_turning && sensor[6] == 1 && sensor[7] == 1 && !center_line_detected() && !left_line_detected()) {
         last_direction = 'r';
         is_turning = true;
+        approach_phase = false;
         right();
       }
 
@@ -228,6 +304,7 @@
         // If middle sensors show white but outer sensors show black, turn based on last direction
         else if (sensor[0] == 0 && sensor[7] == 0) {
           is_turning = true;
+          approach_phase = false;
           if (last_direction == 'l') {
             left();
           } else {
@@ -238,29 +315,34 @@
       
       // Reset turning flag if we're now on the line and centered
       if (is_turning && center_line_detected()) {
-        is_turning = false;
+        // Only reset if both center sensors are on the line for stable detection
+        if (sensor[3] == 1 && sensor[4] == 1) {
+          is_turning = false;
+          approach_phase = false;
+          speed_factor = 0.6; // Reset to moderate speed after turn
+        }
       }
     }
   }
 
   /**
    * Turn right until the center sensors detect the line
-   * Now keeps turning until properly centered
+   * Uses a two-phase approach with a slower final approach
    */
   void right() {
-    // Begin right turn
-    motor(turn_speed, -turn_speed/2); // More aggressive turning
+    // Begin right turn with reduced speed
+    motor(turn_speed, -turn_speed/3);
     
-    // First wait until ALL sensors are off the line (if not already)
+    // First phase: Clear the line
     boolean all_clear = false;
     sensor_reading();
     
-    // If some sensors already see the line, wait until we lose the line completely
+    // If sensors already see the line, wait until we lose it
     if (sensor[0] == 1 || sensor[1] == 1 || sensor[2] == 1 || sensor[3] == 1 || 
         sensor[4] == 1 || sensor[5] == 1 || sensor[6] == 1 || sensor[7] == 1) {
       
       while (!all_clear) {
-        motor(turn_speed, -turn_speed/2);
+        motor(turn_speed, -turn_speed/3);
         sensor_reading();
         
         // Check if all sensors are now clear
@@ -271,38 +353,59 @@
             break;
           }
         }
+        delay(5); // Small delay for stable readings
       }
+      
+      // Brief pause after clearing to ensure stable position
+      delay(20);
     }
     
-    // Keep turning until the center sensors detect the line
-    while (!center_line_detected()) {
-      motor(turn_speed, -turn_speed/3);
+    // Second phase: Main rotation to find line
+    approach_phase = false;
+    while (!approach_phase) {
+      motor(turn_speed, -turn_speed/4);
       sensor_reading();
+      
+      // Look for any sensor detecting the line
+      for (int i = 0; i < 8; i++) {
+        if (sensor[i] == 1) {
+          approach_phase = true;
+          break;
+        }
+      }
+      delay(5); // Small delay for stable readings
     }
     
-    // Apply slight correction after finding center
-    motor(turn_speed/2, turn_speed);
-    delay(25);  // Shorter delay for faster response
+    // Third phase: Slow approach to center on the line
+    while (!center_line_detected()) {
+      motor(final_approach_speed, -final_approach_speed/5);
+      sensor_reading();
+      delay(5); // Small delay for stable readings
+    }
+    
+    // Final correction to center on the line
+    motor(final_approach_speed, final_approach_speed);
+    delay(20);
   }
 
   /**
    * Turn left until the center sensors detect the line
-   * Now keeps turning until properly centered
+   * Uses a two-phase approach with a slower final approach
    */
   void left() {
-    // Begin left turn
-    motor(-turn_speed/2, turn_speed); // More aggressive turning
+    // Begin left turn with reduced speed
+    motor(-turn_speed/3, turn_speed);
     
-    // First wait until ALL sensors are off the line (if not already)
+    // First phase: Clear the line
     boolean all_clear = false;
     sensor_reading();
     
-    // If some sensors already see the line, wait until we lose the line completely
+    // If sensors already see the line, wait until we lose it
     if (sensor[0] == 1 || sensor[1] == 1 || sensor[2] == 1 || sensor[3] == 1 || 
         sensor[4] == 1 || sensor[5] == 1 || sensor[6] == 1 || sensor[7] == 1) {
       
       while (!all_clear) {
-        motor(-turn_speed/2, turn_speed);
+        motor(-turn_speed/3, turn_speed);
         sensor_reading();
         
         // Check if all sensors are now clear
@@ -313,35 +416,75 @@
             break;
           }
         }
+        delay(5); // Small delay for stable readings
       }
+      
+      // Brief pause after clearing to ensure stable position
+      delay(20);
     }
     
-    // Keep turning until the center sensors detect the line
-    while (!center_line_detected()) {
-      motor(-turn_speed/3, turn_speed);
+    // Second phase: Main rotation to find line
+    approach_phase = false;
+    while (!approach_phase) {
+      motor(-turn_speed/4, turn_speed);
       sensor_reading();
+      
+      // Look for any sensor detecting the line
+      for (int i = 0; i < 8; i++) {
+        if (sensor[i] == 1) {
+          approach_phase = true;
+          break;
+        }
+      }
+      delay(5); // Small delay for stable readings
     }
     
-    // Apply slight correction after finding center
-    motor(turn_speed, turn_speed/2);
-    delay(25);  // Shorter delay for faster response
+    // Third phase: Slow approach to center on the line
+    while (!center_line_detected()) {
+      motor(-final_approach_speed/5, final_approach_speed);
+      sensor_reading();
+      delay(5); // Small delay for stable readings
+    }
+    
+    // Final correction to center on the line
+    motor(final_approach_speed, final_approach_speed);
+    delay(20);
   }
   
   /**
    * Perform a 180-degree turn to find the line again
    */
   void U_turn() {
-    // More aggressive U-turn
+    // Initial rotation
     motor(-turn_speed, turn_speed);
+    delay(100); // Give time to start turning
     
-    // Keep turning until any sensor detects the line
-    while (!center_line_detected()) {
+    // First phase: Look for the line
+    approach_phase = false;
+    while (!approach_phase) {
+      motor(-turn_speed, turn_speed);
       sensor_reading();
+      
+      // Look for any sensor detecting the line
+      for (int i = 0; i < 8; i++) {
+        if (sensor[i] == 1) {
+          approach_phase = true;
+          break;
+        }
+      }
+      delay(5);
     }
     
-    // Apply slight correction
-    motor(turn_speed, -turn_speed/3);
-    delay(15);  // Shorter delay for faster response
+    // Second phase: Slow approach to center on the line
+    while (!center_line_detected()) {
+      motor(-final_approach_speed, final_approach_speed);
+      sensor_reading();
+      delay(5);
+    }
+    
+    // Final correction
+    motor(final_approach_speed, final_approach_speed);
+    delay(15);
   }
  
   /**
